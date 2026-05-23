@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 type BoundValue = string | number | null | Uint8Array;
@@ -7,8 +8,9 @@ export class TestD1Database {
   readonly db = new DatabaseSync(":memory:");
 
   constructor() {
-    const migration = readFileSync("migrations/0001_initial.sql", "utf8");
-    this.db.exec(migration);
+    for (const migrationFile of readdirSync("migrations").filter((file) => file.endsWith(".sql")).sort()) {
+      this.db.exec(readFileSync(`migrations/${migrationFile}`, "utf8"));
+    }
   }
 
   prepare(sql: string) {
@@ -57,8 +59,10 @@ export function createTestEnv(overrides: Partial<Env> = {}): Env {
     GITHUB_APP_ID: "0",
     GITHUB_APP_SLUG: "gittensory",
     GITTENSOR_REGISTRY_URL: "https://raw.githubusercontent.com/entrius/gittensor/test/gittensor/validator/weights/master_repositories.json",
-    PUBLIC_API_ORIGIN: "http://localhost:8787",
+    PUBLIC_API_ORIGIN: "https://gittensory-api.zeronode.workers.dev",
     INTERNAL_JOB_TOKEN: "dev-internal-token",
+    GITTENSORY_API_TOKEN: "test-api-token",
+    GITTENSORY_MCP_TOKEN: "test-mcp-token",
     GITHUB_WEBHOOK_SECRET: "test-webhook-secret",
     GITHUB_APP_PRIVATE_KEY: "test-private-key",
     ...overrides,

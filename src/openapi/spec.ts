@@ -14,6 +14,7 @@ import {
   QueueHealthSchema,
   RegistrySnapshotSchema,
   RepositorySchema,
+  RepositorySettingsSchema,
   WorkboardItemSchema,
 } from "./schemas";
 
@@ -34,6 +35,7 @@ export function buildOpenApiSpec() {
   registry.register("MaintainerPacket", MaintainerPacketSchema);
   registry.register("Bounty", BountySchema);
   registry.register("BountyAdvisory", BountyAdvisorySchema);
+  registry.register("RepositorySettings", RepositorySettingsSchema);
 
   registry.registerPath({
     method: "get",
@@ -103,6 +105,13 @@ export function buildOpenApiSpec() {
     path: "/v1/repos/{owner}/{repo}/config-quality",
     responses: {
       200: { description: "Gittensor repository config quality signals", content: { "application/json": { schema: ConfigQualitySchema } } },
+    },
+  });
+  registry.registerPath({
+    method: "get",
+    path: "/v1/repos/{owner}/{repo}/settings",
+    responses: {
+      200: { description: "Gittensory repository automation settings", content: { "application/json": { schema: RepositorySettingsSchema } } },
     },
   });
   registry.registerPath({

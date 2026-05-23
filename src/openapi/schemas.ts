@@ -279,6 +279,17 @@ export const BountyAdvisorySchema = z
   })
   .openapi("BountyAdvisory");
 
+export const RepositorySettingsSchema = z
+  .object({
+    repoFullName: z.string(),
+    commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]),
+    publicSignalLevel: z.enum(["minimal", "standard"]),
+    checkRunMode: z.enum(["enabled"]),
+    createdAt: z.string().nullable().optional(),
+    updatedAt: z.string().nullable().optional(),
+  })
+  .openapi("RepositorySettings");
+
 export const HealthSchema = z
   .object({
     status: z.literal("ok"),

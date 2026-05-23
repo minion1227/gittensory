@@ -33,6 +33,15 @@ export const repositories = sqliteTable("repositories", {
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+export const repositorySettings = sqliteTable("repository_settings", {
+  repoFullName: text("repo_full_name").primaryKey(),
+  commentMode: text("comment_mode").notNull().default("off"),
+  publicSignalLevel: text("public_signal_level").notNull().default("standard"),
+  checkRunMode: text("check_run_mode").notNull().default("enabled"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const registrySnapshots = sqliteTable("registry_snapshots", {
   id: text("id").primaryKey(),
   sourceKind: text("source_kind").notNull(),

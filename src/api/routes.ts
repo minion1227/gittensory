@@ -7,6 +7,7 @@ import {
   getIssue,
   getPullRequest,
   getRepository,
+  getRepositorySettings,
   listAllIssues,
   listAllPullRequests,
   listBounties,
@@ -20,9 +21,11 @@ import {
   listRepositories,
   persistAdvisory,
   upsertBounty,
+  upsertRepositorySettings,
 } from "../db/repositories";
 import { fetchPublicContributorProfile } from "../github/public";
 import { handleGitHubWebhook } from "../github/webhook";
+import { handleMcpRequest } from "../mcp/server";
 import { buildOpenApiSpec } from "../openapi/spec";
 import { getLatestRegistrySnapshot, refreshRegistry } from "../registry/sync";
 import { buildIssueAdvisory, buildPullRequestAdvisory, buildRepositoryAdvisory } from "../rules/advisory";
@@ -54,12 +57,24 @@ const preflightSchema = z.object({
   authorAssociation: z.string().optional(),
 });
 
+const repositorySettingsSchema = z.object({
+  commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]),
+  publicSignalLevel: z.enum(["minimal", "standard"]).default("standard"),
+});
+
 export function createApp() {
   const app = new Hono<AppBindings>();
   app.use("*", cors());
+  app.use("*", async (c, next) => {
+    if (!requiresApiToken(c.req.path)) return next();
+    const token = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!token || token !== c.env.GITTENSORY_API_TOKEN) return c.json({ error: "unauthorized" }, 401);
+    return next();
+  });
 
   app.get("/health", (c) => c.json({ status: "ok", service: "gittensory-api", time: nowIso() }));
   app.get("/openapi.json", (c) => c.json(buildOpenApiSpec()));
+  app.all("/mcp", handleMcpRequest);
 
   app.get("/v1/registry/snapshot", async (c) => {
     const snapshot = await getLatestRegistrySnapshot(c.env);
@@ -112,6 +127,11 @@ export function createApp() {
     const issues = await listIssues(c.env, fullName);
     const pullRequests = await listPullRequests(c.env, fullName);
     return c.json(buildConfigQuality(repo, issues, pullRequests, fullName));
+  });
+
+  app.get("/v1/repos/:owner/:repo/settings", async (c) => {
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    return c.json(await getRepositorySettings(c.env, fullName));
   });
 
   app.get("/v1/repos/:owner/:repo/maintainer-packet", async (c) => {
@@ -217,5 +237,30 @@ export function createApp() {
     return c.json({ ok: true, imported: bounties.length });
   });
 
+  app.post("/v1/internal/repos/:owner/:repo/settings", async (c) => {
+    const token = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!token || token !== c.env.INTERNAL_JOB_TOKEN) return c.json({ error: "unauthorized" }, 401);
+    const body = await c.req.json().catch(() => null);
+    const parsed = repositorySettingsSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid_repository_settings", issues: parsed.error.issues }, 400);
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    return c.json(
+      await upsertRepositorySettings(c.env, {
+        repoFullName: fullName,
+        commentMode: parsed.data.commentMode,
+        publicSignalLevel: parsed.data.publicSignalLevel,
+        checkRunMode: "enabled",
+      }),
+    );
+  });
+
   return app;
+}
+
+function requiresApiToken(path: string): boolean {
+  if (path === "/health") return false;
+  if (path === "/mcp") return false;
+  if (path === "/v1/github/webhook") return false;
+  if (path.startsWith("/v1/internal/")) return false;
+  return path === "/openapi.json" || path.startsWith("/v1/");
 }

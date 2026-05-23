@@ -12,14 +12,13 @@
     "GITHUB_APP_ID": "0",
     "GITHUB_APP_SLUG": "gittensory",
     "GITTENSOR_REGISTRY_URL": "https://raw.githubusercontent.com/entrius/gittensor/test/gittensor/validator/weights/master_repositories.json",
-    "PUBLIC_API_ORIGIN": "http://localhost:8787",
-    "INTERNAL_JOB_TOKEN": "dev-internal-token"
+    "PUBLIC_API_ORIGIN": "https://gittensory-api.zeronode.workers.dev"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "gittensory",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "b2c79dd6-7771-4b1f-aa6b-085d5f3e9528",
       "migrations_dir": "migrations"
     }
   ],

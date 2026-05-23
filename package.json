@@ -19,7 +19,9 @@
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@hono/zod-validator": "^0.7.4",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@octokit/core": "^7.0.6",
+    "agents": "^0.7.9",
     "drizzle-orm": "^0.45.0",
     "hono": "^4.12.22",
     "zod": "^3.25.76"

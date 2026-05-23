@@ -1,0 +1,83 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createOrUpdatePrIntelligenceComment, PR_INTELLIGENCE_COMMENT_MARKER } from "../../src/github/comments";
+import { createTestEnv } from "../helpers/d1";
+
+describe("GitHub PR intelligence comments", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("creates a sticky comment when no prior Gittensory comment exists", async () => {
+    const privateKey = await generatePrivateKeyPem();
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
+      if (url.includes("/issues/12/comments") && (init?.method ?? "GET") === "GET") return Response.json([]);
+      if (url.includes("/issues/12/comments") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { body: string };
+        expect(body.body).toContain(PR_INTELLIGENCE_COMMENT_MARKER);
+        return Response.json({ id: 101, html_url: "https://github.com/comment/101" });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const result = await createOrUpdatePrIntelligenceComment(
+      createTestEnv({ GITHUB_APP_PRIVATE_KEY: privateKey }),
+      123,
+      "JSONbored/gittensory",
+      12,
+      `${PR_INTELLIGENCE_COMMENT_MARKER}\nbody`,
+    );
+
+    expect(result?.id).toBe(101);
+    expect(calls.some((call) => call.startsWith("POST ") && call.includes("/issues/12/comments"))).toBe(true);
+  });
+
+  it("updates an existing sticky comment instead of duplicating it", async () => {
+    const privateKey = await generatePrivateKeyPem();
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
+      if (url.includes("/issues/12/comments") && (init?.method ?? "GET") === "GET") {
+        return Response.json([{ id: 101, body: `${PR_INTELLIGENCE_COMMENT_MARKER}\nold body` }]);
+      }
+      if (url.includes("/issues/comments/101") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as { body: string };
+        expect(body.body).toContain("new body");
+        return Response.json({ id: 101, html_url: "https://github.com/comment/101" });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const result = await createOrUpdatePrIntelligenceComment(
+      createTestEnv({ GITHUB_APP_PRIVATE_KEY: privateKey }),
+      123,
+      "JSONbored/gittensory",
+      12,
+      `${PR_INTELLIGENCE_COMMENT_MARKER}\nnew body`,
+    );
+
+    expect(result?.id).toBe(101);
+    expect(calls.some((call) => call.startsWith("PATCH ") && call.includes("/issues/comments/101"))).toBe(true);
+  });
+});
+
+async function generatePrivateKeyPem(): Promise<string> {
+  const key = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  )) as CryptoKeyPair;
+  const exported = await crypto.subtle.exportKey("pkcs8", key.privateKey);
+  const base64 = Buffer.from(exported as ArrayBuffer).toString("base64").replace(/(.{64})/g, "$1\n");
+  return `-----BEGIN PRIVATE KEY-----\n${base64}\n-----END PRIVATE KEY-----`;
+}

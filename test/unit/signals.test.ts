@@ -6,7 +6,10 @@ import {
   buildContributorProfile,
   buildLaneAdvice,
   buildPreflightResult,
+  buildPublicPrIntelligenceComment,
   buildQueueHealth,
+  detectGittensorContributor,
+  shouldPublishPrIntelligenceComment,
 } from "../../src/signals/engine";
 import type { IssueRecord, PullRequestRecord, RepositoryRecord } from "../../src/types";
 
@@ -126,5 +129,40 @@ describe("world-class backend signals", () => {
     expect(result.status).toBe("needs_work");
     expect(JSON.stringify(result)).not.toMatch(/reward|farming/i);
     expect(result.findings.map((finding) => finding.code)).toContain("missing_test_evidence");
+  });
+
+  it("gates public comments to detected contributors and sanitizes comment text", () => {
+    const currentPr = pullRequests[0]!;
+    const priorPr: PullRequestRecord = {
+      ...currentPr,
+      number: 3,
+      state: "closed",
+      mergedAt: "2026-05-01T00:00:00.000Z",
+    };
+    const detection = detectGittensorContributor("oktofeesh1", currentPr, [currentPr, priorPr], []);
+    const settings = {
+      repoFullName: repo.fullName,
+      commentMode: "detected_contributors_only" as const,
+      publicSignalLevel: "standard" as const,
+      checkRunMode: "enabled" as const,
+    };
+    const collisions = buildCollisionReport(repo.fullName, issues, pullRequests);
+    const queueHealth = buildQueueHealth(repo, issues, pullRequests, collisions);
+    const preflight = buildPreflightResult(
+      { repoFullName: repo.fullName, title: currentPr.title, body: "Fixes #7", linkedIssues: [7] },
+      repo,
+      issues,
+      pullRequests,
+    );
+    const profile = buildContributorProfile("oktofeesh1", { login: "oktofeesh1", topLanguages: ["TypeScript"], source: "github" }, [
+      currentPr,
+      priorPr,
+    ], []);
+    const comment = buildPublicPrIntelligenceComment({ repo, pr: currentPr, profile, detection, queueHealth, collisions, preflight, settings });
+
+    expect(detection.detected).toBe(true);
+    expect(shouldPublishPrIntelligenceComment(settings, detection)).toBe(true);
+    expect(comment).toContain("<!-- gittensory-pr-intelligence -->");
+    expect(comment).not.toMatch(/wallet|raw trust score|ranking|farming|reward/i);
   });
 });

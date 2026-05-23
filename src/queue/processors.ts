@@ -1,6 +1,11 @@
 import {
   getRepository,
+  getRepositorySettings,
+  listContributorIssues,
+  listContributorPullRequests,
+  listIssues,
   listOtherOpenPullRequests,
+  listPullRequests,
   markInstallationDeleted,
   persistAdvisory,
   recordWebhookEvent,
@@ -10,8 +15,19 @@ import {
   upsertRepositoryFromGitHub,
 } from "../db/repositories";
 import { createOrUpdateCheckRun, getInstallationId } from "../github/app";
+import { createOrUpdatePrIntelligenceComment } from "../github/comments";
+import { fetchPublicContributorProfile } from "../github/public";
 import { refreshRegistry } from "../registry/sync";
 import { buildIssueAdvisory, buildPullRequestAdvisory } from "../rules/advisory";
+import {
+  buildCollisionReport,
+  buildContributorProfile,
+  buildPreflightResult,
+  buildPublicPrIntelligenceComment,
+  buildQueueHealth,
+  detectGittensorContributor,
+  shouldPublishPrIntelligenceComment,
+} from "../signals/engine";
 import type { GitHubWebhookPayload, JobMessage } from "../types";
 
 export async function processJob(env: Env, message: JobMessage): Promise<void> {
@@ -56,6 +72,20 @@ async function processGitHubWebhook(env: Env, deliveryId: string, eventName: str
       const advisory = buildPullRequestAdvisory(repo, pr, { otherOpenPullRequests });
       await persistAdvisory(env, advisory);
       if (installationId && advisory.headSha) await createOrUpdateCheckRun(env, installationId, payload.repository.full_name, advisory);
+      if (installationId) {
+        await maybePublishPrIntelligenceComment(env, installationId, payload.repository.full_name, pr, repo).catch((error) => {
+          console.error(
+            JSON.stringify({
+              level: "warn",
+              event: "pr_intelligence_comment_failed",
+              deliveryId,
+              repository: payload.repository?.full_name,
+              pullNumber: pr.number,
+              error: error instanceof Error ? error.message : "unknown error",
+            }),
+          );
+        });
+      }
     }
 
     if (payload.repository?.full_name && payload.issue && !payload.issue.pull_request) {
@@ -87,4 +117,56 @@ async function processGitHubWebhook(env: Env, deliveryId: string, eventName: str
     });
     throw error;
   }
+}
+
+async function maybePublishPrIntelligenceComment(
+  env: Env,
+  installationId: number,
+  repoFullName: string,
+  pr: Awaited<ReturnType<typeof upsertPullRequestFromGitHub>>,
+  repo: Awaited<ReturnType<typeof getRepository>>,
+): Promise<void> {
+  const settings = await getRepositorySettings(env, repoFullName);
+  if (settings.commentMode === "off") return;
+  const author = pr.authorLogin;
+  if (!author) return;
+
+  const [contributorPullRequests, contributorIssues, repoIssues, repoPullRequests, github] = await Promise.all([
+    listContributorPullRequests(env, author),
+    listContributorIssues(env, author),
+    listIssues(env, repoFullName),
+    listPullRequests(env, repoFullName),
+    fetchPublicContributorProfile(author),
+  ]);
+  const detection = detectGittensorContributor(author, pr, contributorPullRequests, contributorIssues);
+  if (!shouldPublishPrIntelligenceComment(settings, detection)) return;
+
+  const profile = buildContributorProfile(author, github, contributorPullRequests, contributorIssues);
+  const collisions = buildCollisionReport(repoFullName, repoIssues, repoPullRequests);
+  const queueHealth = buildQueueHealth(repo, repoIssues, repoPullRequests, collisions);
+  const preflight = buildPreflightResult(
+    {
+      repoFullName,
+      contributorLogin: author,
+      title: pr.title,
+      body: pr.body ?? undefined,
+      labels: pr.labels,
+      linkedIssues: pr.linkedIssues,
+      authorAssociation: pr.authorAssociation ?? undefined,
+    },
+    repo,
+    repoIssues,
+    repoPullRequests,
+  );
+  const body = buildPublicPrIntelligenceComment({
+    repo,
+    pr,
+    profile,
+    detection,
+    queueHealth,
+    collisions,
+    preflight,
+    settings,
+  });
+  await createOrUpdatePrIntelligenceComment(env, installationId, repoFullName, pr.number, body);
 }

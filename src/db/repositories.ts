@@ -1,6 +1,6 @@
 import { and, desc, eq, not } from "drizzle-orm";
 import { getDb } from "./client";
-import { advisories, bounties, installations, issues, pullRequests, repositories, webhookEvents } from "./schema";
+import { advisories, bounties, installations, issues, pullRequests, repositories, repositorySettings, webhookEvents } from "./schema";
 import type {
   Advisory,
   BountyRecord,
@@ -11,6 +11,7 @@ import type {
   IssueRecord,
   PullRequestRecord,
   RegistryRepoConfig,
+  RepositorySettings,
   RepositoryRecord,
 } from "../types";
 import { jsonString, nowIso, parseJson, repoParts } from "../utils/json";
@@ -181,6 +182,50 @@ export async function listRepositories(env: Env): Promise<RepositoryRecord[]> {
   const db = getDb(env.DB);
   const rows = await db.select().from(repositories).orderBy(desc(repositories.isRegistered), repositories.fullName);
   return rows.map(toRepositoryRecord);
+}
+
+export async function getRepositorySettings(env: Env, fullName: string): Promise<RepositorySettings> {
+  const db = getDb(env.DB);
+  const [row] = await db.select().from(repositorySettings).where(eq(repositorySettings.repoFullName, fullName)).limit(1);
+  if (!row) {
+    return {
+      repoFullName: fullName,
+      commentMode: "off",
+      publicSignalLevel: "standard",
+      checkRunMode: "enabled",
+    };
+  }
+  return {
+    repoFullName: row.repoFullName,
+    commentMode: parseCommentMode(row.commentMode),
+    publicSignalLevel: row.publicSignalLevel === "minimal" ? "minimal" : "standard",
+    checkRunMode: "enabled",
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export async function upsertRepositorySettings(env: Env, settings: RepositorySettings): Promise<RepositorySettings> {
+  const db = getDb(env.DB);
+  await db
+    .insert(repositorySettings)
+    .values({
+      repoFullName: settings.repoFullName,
+      commentMode: settings.commentMode,
+      publicSignalLevel: settings.publicSignalLevel,
+      checkRunMode: "enabled",
+      updatedAt: nowIso(),
+    })
+    .onConflictDoUpdate({
+      target: repositorySettings.repoFullName,
+      set: {
+        commentMode: settings.commentMode,
+        publicSignalLevel: settings.publicSignalLevel,
+        checkRunMode: "enabled",
+        updatedAt: nowIso(),
+      },
+    });
+  return getRepositorySettings(env, settings.repoFullName);
 }
 
 export async function getPullRequest(env: Env, fullName: string, number: number): Promise<PullRequestRecord | null> {
@@ -472,6 +517,11 @@ function toBountyRecord(row: typeof bounties.$inferSelect): BountyRecord {
     discoveredAt: row.discoveredAt,
     updatedAt: row.updatedAt,
   };
+}
+
+function parseCommentMode(value: string): RepositorySettings["commentMode"] {
+  if (value === "detected_contributors_only" || value === "all_prs") return value;
+  return "off";
 }
 
 export function extractLinkedIssueNumbers(text: string): number[] {

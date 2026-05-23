@@ -197,3 +197,12 @@ export type BountyRecord = {
   discoveredAt?: string | null | undefined;
   updatedAt?: string | null | undefined;
 };
+
+export type RepositorySettings = {
+  repoFullName: string;
+  commentMode: "off" | "detected_contributors_only" | "all_prs";
+  publicSignalLevel: "minimal" | "standard";
+  checkRunMode: "enabled";
+  createdAt?: string | null | undefined;
+  updatedAt?: string | null | undefined;
+};

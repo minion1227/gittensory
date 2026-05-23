@@ -4,6 +4,7 @@ import type {
   IssueRecord,
   PullRequestRecord,
   RepositoryRecord,
+  RepositorySettings,
 } from "../types";
 import type { PublicContributorProfile } from "../github/public";
 import { nowIso } from "../utils/json";
@@ -154,6 +155,14 @@ export type BountyAdvisory = {
   fundingStatus: "funded" | "target_only" | "unknown";
   consensusRisk: "low" | "medium" | "high";
   findings: SignalFinding[];
+};
+
+export type ContributorDetection = {
+  detected: boolean;
+  reason: string;
+  priorPullRequests: number;
+  priorMergedPullRequests: number;
+  priorIssues: number;
 };
 
 const STOPWORDS = new Set([
@@ -447,6 +456,50 @@ export function buildContributorProfile(
   };
 }
 
+export function detectGittensorContributor(
+  login: string,
+  currentPr: PullRequestRecord,
+  pullRequests: PullRequestRecord[],
+  issues: IssueRecord[],
+): ContributorDetection {
+  const priorPullRequests = pullRequests.filter(
+    (pr) => sameLogin(pr.authorLogin, login) && !(pr.repoFullName === currentPr.repoFullName && pr.number === currentPr.number),
+  );
+  const priorIssues = issues.filter((issue) => sameLogin(issue.authorLogin, login));
+  const priorMergedPullRequests = priorPullRequests.filter((pr) => pr.mergedAt || pr.state === "merged");
+  if (priorMergedPullRequests.length > 0) {
+    return {
+      detected: true,
+      reason: "Contributor has prior merged PR activity in registered repos cached by Gittensory.",
+      priorPullRequests: priorPullRequests.length,
+      priorMergedPullRequests: priorMergedPullRequests.length,
+      priorIssues: priorIssues.length,
+    };
+  }
+  if (priorPullRequests.length > 0 || priorIssues.length > 0) {
+    return {
+      detected: true,
+      reason: "Contributor has prior registered-repo activity cached by Gittensory.",
+      priorPullRequests: priorPullRequests.length,
+      priorMergedPullRequests: priorMergedPullRequests.length,
+      priorIssues: priorIssues.length,
+    };
+  }
+  return {
+    detected: false,
+    reason: "No prior registered-repo activity was found in the local Gittensory cache.",
+    priorPullRequests: 0,
+    priorMergedPullRequests: 0,
+    priorIssues: 0,
+  };
+}
+
+export function shouldPublishPrIntelligenceComment(settings: RepositorySettings, detection: ContributorDetection): boolean {
+  if (settings.commentMode === "off") return false;
+  if (settings.commentMode === "all_prs") return true;
+  return detection.detected;
+}
+
 export function buildContributorOpportunities(
   profile: ContributorProfile,
   repositories: RepositoryRecord[],
@@ -652,6 +705,57 @@ export function buildBountyAdvisory(bounty: BountyRecord, repo: RepositoryRecord
     consensusRisk: issue && issue.linkedPrs.length > 1 ? "medium" : lifecycle === "active" && !issue ? "high" : "low",
     findings,
   };
+}
+
+export function buildPublicPrIntelligenceComment(args: {
+  repo: RepositoryRecord | null;
+  pr: PullRequestRecord;
+  profile: ContributorProfile;
+  detection: ContributorDetection;
+  queueHealth: QueueHealth;
+  collisions: CollisionReport;
+  preflight: PreflightResult;
+  settings: RepositorySettings;
+}): string {
+  const publicFindings = args.preflight.findings
+    .filter((finding) => finding.severity !== "critical")
+    .slice(0, args.settings.publicSignalLevel === "minimal" ? 2 : 5);
+  const collisionCount = args.collisions.clusters.length;
+  const linkedIssues = args.pr.linkedIssues.length > 0 ? args.pr.linkedIssues.map((issue) => `#${issue}`).join(", ") : "None detected";
+  const nextSteps = [
+    ...(args.pr.linkedIssues.length === 0 ? ["Link the issue being solved, or explain why this is a no-issue PR."] : []),
+    ...(collisionCount > 0 ? ["Check overlapping issues/PRs before review continues."] : []),
+    ...(publicFindings.length > 0 ? publicFindings.flatMap((finding) => (finding.action ? [finding.action] : [])) : []),
+  ];
+  return [
+    "<!-- gittensory-pr-intelligence -->",
+    "## Gittensory contribution context",
+    "",
+    "_Advisory context generated from public GitHub metadata and Gittensory's registered-repo cache. This is not an endorsement or compensation estimate._",
+    "",
+    "### Contributor context",
+    `- Author: \`${args.pr.authorLogin ?? "unknown"}\``,
+    `- Registered-repo signal: ${args.detection.detected ? args.detection.reason : "No prior cached registered-repo activity detected."}`,
+    `- Prior cached PRs/issues: ${args.detection.priorPullRequests} PR(s), ${args.detection.priorIssues} issue(s)`,
+    `- Public profile languages: ${args.profile.github.topLanguages.length > 0 ? args.profile.github.topLanguages.join(", ") : "not available"}`,
+    "",
+    "### PR hygiene",
+    `- Linked issues: ${linkedIssues}`,
+    `- Lane context: ${buildLaneAdvice(args.repo, args.pr.repoFullName).summary}`,
+    `- Review burden: ${args.preflight.reviewBurden}`,
+    "",
+    "### Duplicate/WIP risk",
+    `- Collision clusters found: ${collisionCount}`,
+    `- Queue level: ${args.queueHealth.level}`,
+    "",
+    "### Maintainer notes",
+    ...(publicFindings.length > 0
+      ? publicFindings.map((finding) => `- ${finding.title}: ${finding.publicText ?? finding.detail}`)
+      : ["- No public-safe advisory findings were generated from cached metadata."]),
+    "",
+    "### Contributor next steps",
+    ...(nextSteps.length > 0 ? [...new Set(nextSteps)].map((step) => `- ${step}`) : ["- Keep the PR focused and include validation evidence before maintainer review."]),
+  ].join("\n");
 }
 
 function issueItem(issue: IssueRecord): CollisionItem {

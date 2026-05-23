@@ -10,7 +10,7 @@ describe("api routes", () => {
     vi.unstubAllGlobals();
   });
 
-  it("serves health and OpenAPI without storage", async () => {
+  it("serves health openly and keeps OpenAPI private", async () => {
     const app = createApp();
     const env = createTestEnv();
 
@@ -18,7 +18,10 @@ describe("api routes", () => {
     expect(health.status).toBe(200);
     await expect(health.json()).resolves.toMatchObject({ status: "ok", service: "gittensory-api" });
 
-    const spec = await app.request("/openapi.json", {}, env);
+    const unauthenticatedSpec = await app.request("/openapi.json", {}, env);
+    expect(unauthenticatedSpec.status).toBe(401);
+
+    const spec = await app.request("/openapi.json", { headers: apiHeaders(env) }, env);
     expect(spec.status).toBe(200);
     await expect(spec.json()).resolves.toMatchObject({ info: { title: "Gittensory API" } });
   });
@@ -107,11 +110,14 @@ describe("api routes", () => {
       return new Response("not found", { status: 404 });
     });
 
-    const queueHealth = await app.request("/v1/repos/entrius/allways-ui/queue-health", {}, env);
+    const unauthenticated = await app.request("/v1/repos/entrius/allways-ui/queue-health", {}, env);
+    expect(unauthenticated.status).toBe(401);
+
+    const queueHealth = await app.request("/v1/repos/entrius/allways-ui/queue-health", { headers: apiHeaders(env) }, env);
     expect(queueHealth.status).toBe(200);
     await expect(queueHealth.json()).resolves.toMatchObject({ repoFullName: "entrius/allways-ui", signals: { openPullRequests: 2 } });
 
-    const configQuality = await app.request("/v1/repos/entrius/allways-ui/config-quality", {}, env);
+    const configQuality = await app.request("/v1/repos/entrius/allways-ui/config-quality", { headers: apiHeaders(env) }, env);
     expect(configQuality.status).toBe(200);
     await expect(configQuality.json()).resolves.toMatchObject({ notObservedConfiguredLabels: expect.arrayContaining(["refactor"]) });
 
@@ -119,6 +125,7 @@ describe("api routes", () => {
       "/v1/preflight/pr",
       {
         method: "POST",
+        headers: apiHeaders(env),
         body: JSON.stringify({
           repoFullName: "entrius/allways-ui",
           title: "Fix dashboard cache refresh after reconnect",
@@ -131,7 +138,7 @@ describe("api routes", () => {
     expect(preflight.status).toBe(200);
     await expect(preflight.json()).resolves.toMatchObject({ status: "needs_work" });
 
-    const opportunities = await app.request("/v1/contributors/oktofeesh1/opportunities", {}, env);
+    const opportunities = await app.request("/v1/contributors/oktofeesh1/opportunities", { headers: apiHeaders(env) }, env);
     expect(opportunities.status).toBe(200);
     const opportunityPayload = (await opportunities.json()) as {
       profile: { github: { topLanguages: string[] } };
@@ -165,13 +172,117 @@ describe("api routes", () => {
     expect(imported.status).toBe(200);
     await expect(imported.json()).resolves.toMatchObject({ imported: 1 });
 
-    const bounties = await app.request("/v1/bounties", {}, env);
+    const bounties = await app.request("/v1/bounties", { headers: apiHeaders(env) }, env);
     expect(bounties.status).toBe(200);
     await expect(bounties.json()).resolves.toHaveLength(2);
 
-    const bountyAdvisory = await app.request("/v1/bounties/bounty-1/advisory", {}, env);
+    const bountyAdvisory = await app.request("/v1/bounties/bounty-1/advisory", { headers: apiHeaders(env) }, env);
     expect(bountyAdvisory.status).toBe(200);
     await expect(bountyAdvisory.json()).resolves.toMatchObject({ lifecycle: "historical", fundingStatus: "target_only" });
+  });
+
+  it("serves private MCP tool listing and tool calls", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+    await seedSignalData(env);
+
+    const unauthorized = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      },
+      env,
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const tools = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: mcpHeaders(env),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "gittensory-tests", version: "0.1.0" },
+          },
+        }),
+      },
+      env,
+    );
+    expect(tools.status).toBe(200);
+    const initializePayload = (await mcpJson(tools)) as { result: { serverInfo: { name: string } } };
+    expect(initializePayload.result.serverInfo.name).toBe("gittensory");
+
+    const toolsList = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: mcpHeaders(env),
+        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+      },
+      env,
+    );
+    expect(toolsList.status).toBe(200);
+    const toolsPayload = (await mcpJson(toolsList)) as { result: { tools: Array<{ name: string }> } };
+    expect(toolsPayload.result.tools.map((tool) => tool.name)).toContain("gittensory_preflight_pr");
+
+    const call = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: mcpHeaders(env),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "gittensory_get_queue_health",
+            arguments: { owner: "entrius", repo: "allways-ui" },
+          },
+        }),
+      },
+      env,
+    );
+    expect(call.status).toBe(200);
+    const callPayload = (await mcpJson(call)) as { result: { structuredContent: { repoFullName: string }; content: Array<{ text: string }> } };
+    expect(callPayload.result.structuredContent.repoFullName).toBe("entrius/allways-ui");
+    expect(callPayload.result.content[0]?.text).not.toMatch(/reward|farming/i);
+  });
+
+  it("updates repository settings through protected internal API", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+
+    const rejected = await app.request(
+      "/v1/internal/repos/entrius/allways-ui/settings",
+      {
+        method: "POST",
+        body: JSON.stringify({ commentMode: "detected_contributors_only", publicSignalLevel: "minimal" }),
+      },
+      env,
+    );
+    expect(rejected.status).toBe(401);
+
+    const updated = await app.request(
+      "/v1/internal/repos/entrius/allways-ui/settings",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` },
+        body: JSON.stringify({ commentMode: "detected_contributors_only", publicSignalLevel: "minimal" }),
+      },
+      env,
+    );
+    expect(updated.status).toBe(200);
+    await expect(updated.json()).resolves.toMatchObject({ commentMode: "detected_contributors_only", publicSignalLevel: "minimal" });
+
+    const settings = await app.request("/v1/repos/entrius/allways-ui/settings", { headers: apiHeaders(env) }, env);
+    expect(settings.status).toBe(200);
+    await expect(settings.json()).resolves.toMatchObject({ commentMode: "detected_contributors_only" });
   });
 });
 
@@ -181,6 +292,33 @@ async function signWebhook(body: string, secret: string): Promise<string> {
   ]);
   const signed = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
   return `sha256=${[...new Uint8Array(signed)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function mcpHeaders(env: Env, sessionId?: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${env.GITTENSORY_MCP_TOKEN}`,
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+    ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+  };
+}
+
+function apiHeaders(env: Env): Record<string, string> {
+  return {
+    authorization: `Bearer ${env.GITTENSORY_API_TOKEN}`,
+    "content-type": "application/json",
+  };
+}
+
+async function mcpJson(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (response.headers.get("content-type")?.includes("application/json")) return JSON.parse(text);
+  const dataLine = text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("data: "));
+  if (!dataLine) throw new Error(`Missing MCP data event: ${text}`);
+  return JSON.parse(dataLine.slice("data: ".length));
 }
 
 async function seedSignalData(env: Env): Promise<void> {
