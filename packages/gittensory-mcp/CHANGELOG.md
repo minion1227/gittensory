@@ -5,9 +5,7 @@
 
 ### Features
 
-- Add deterministic base-agent orchestrator
-
-- Add optional workers ai summaries
+- Add deterministic base-agent orchestrator (#14)
 
 
 
