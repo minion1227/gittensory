@@ -11,6 +11,7 @@ import {
   buildContributorScoringProfile,
   buildContributorStrategy,
   buildContributorIntakeHealth,
+  buildIssueDiscoveryLifecycleReport,
   buildIssueQualityReport,
   buildLabelAudit,
   buildLocalDiffPreflightResult,
@@ -458,11 +459,23 @@ describe("v2 signal builders", () => {
         repoFullName: repo.fullName,
         number: 44,
         title: "Fix already solved report",
-        state: "open",
+        state: "merged",
+        mergedAt: "2026-05-01T00:00:00.000Z",
         linkedIssues: [23],
         labels: ["bug"],
         authorLogin: "oktofeesh1",
         body: "Fixes #23",
+        updatedAt: "2025-01-01T00:00:00.000Z",
+      },
+      {
+        repoFullName: repo.fullName,
+        number: 45,
+        title: "Stale contributor branch",
+        state: "open",
+        linkedIssues: [],
+        labels: ["bug"],
+        authorLogin: "oktofeesh1",
+        body: "",
         updatedAt: "2025-01-01T00:00:00.000Z",
       },
     ];
@@ -473,6 +486,28 @@ describe("v2 signal builders", () => {
       repo.fullName,
     );
     expect(issueQuality.issues.map((issue) => issue.status)).toEqual(expect.arrayContaining(["ready", "needs_proof", "do_not_use"]));
+    expect(issueQuality.issues.find((issue) => issue.number === 22)).toMatchObject({ lifecycle: "stale" });
+    expect(issueQuality.issues.find((issue) => issue.number === 23)).toMatchObject({ lifecycle: "valid_solved", status: "do_not_use" });
+
+    const lifecycle = buildIssueDiscoveryLifecycleReport(
+      { ...repo, registryConfig: { ...repo.registryConfig!, issueDiscoveryShare: 0.5 } },
+      [
+        ...issueSet,
+        { repoFullName: repo.fullName, number: 24, title: "Duplicate", state: "closed", body: "", labels: ["duplicate"], linkedPrs: [] },
+        { repoFullName: repo.fullName, number: 25, title: "Closed without solver", state: "closed", body: "", labels: [], linkedPrs: [] },
+      ],
+      prSet,
+      repo.fullName,
+    );
+    expect(lifecycle.states.map((state) => [state.number, state.state])).toEqual(expect.arrayContaining([[23, "valid_solved"], [24, "duplicate"], [25, "closed_not_solved"]]));
+
+    const unverifiedMentionLifecycle = buildIssueDiscoveryLifecycleReport(
+      { ...repo, registryConfig: { ...repo.registryConfig!, issueDiscoveryShare: 0.5 } },
+      [{ repoFullName: repo.fullName, number: 26, title: "Mentioned PR", state: "closed", body: "Maybe PR #123 helps.", labels: [], linkedPrs: [123] }],
+      [],
+      repo.fullName,
+    );
+    expect(unverifiedMentionLifecycle.states[0]).toMatchObject({ number: 26, state: "closed_not_solved", solvedByPullRequests: [] });
 
     const collisions = buildCollisionReport(repo.fullName, issueSet, prSet);
     const forecast = buildBurdenForecast(repo, issueSet, prSet, collisions, 7);
