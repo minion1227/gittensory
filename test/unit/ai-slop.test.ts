@@ -116,6 +116,15 @@ describe("slopFindingFromOpinion", () => {
     expect(finding?.detail).toContain("An AI maintainer-assist pass flagged");
     expect(finding?.detail).toContain("mostly reformatting");
   });
+
+  it("uses the generic fallback when a non-empty rationale neutralizes to an empty string, not just null", () => {
+    // A rationale of only control characters survives parseSlopOpinion's trim() but neutralizes to "" (not
+    // null) in toPublicSafe, so a `??` fallback was skipped and the detail began with a malformed " Observations: …".
+    const finding = slopFindingFromOpinion({ band: "high", rationale: String.fromCharCode(1), signals: ["mostly reformatting"] });
+    expect(finding?.detail).toContain("An AI maintainer-assist pass flagged");
+    expect(finding?.detail).not.toMatch(/^\s/);
+    expect(finding?.detail).toContain("mostly reformatting");
+  });
 });
 
 describe("buildUserPrompt", () => {

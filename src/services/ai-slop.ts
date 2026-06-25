@@ -120,7 +120,10 @@ export function slopFindingFromOpinion(opinion: SlopOpinion): SignalFinding | nu
   const safeSignals = opinion.signals.map((s) => toPublicSafe(s)).filter((s): s is string => Boolean(s));
   // Nothing publishable survived sanitization → drop the advisory entirely (fail-safe, never publish).
   if (!safeRationale && safeSignals.length === 0) return null;
-  const detailBody = safeRationale ?? "An AI maintainer-assist pass flagged possible low-effort patterns in this change.";
+  // `||` not `??`: toPublicSafe can return "" (not only null) when a non-empty rationale neutralizes away
+  // (e.g. control-char-only text), and an empty body must still take the generic fallback — matching the
+  // `!safeRationale` drop-guard above, which already treats "" and null alike.
+  const detailBody = safeRationale || "An AI maintainer-assist pass flagged possible low-effort patterns in this change.";
   const detail = safeSignals.length > 0 ? `${detailBody} Observations: ${safeSignals.join("; ")}.` : detailBody;
   const publicText = `AI maintainer-assist (advisory): ${detail}`;
   return {
