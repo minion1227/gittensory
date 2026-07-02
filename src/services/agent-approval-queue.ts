@@ -3,6 +3,7 @@ import { createInstallationToken } from "../github/app";
 import { loadLinkedIssueHardRules, resolveLinkedIssueHardRule } from "../review/linked-issue-hard-rules";
 import { executeAgentMaintenanceActions, pendingActionToPlanned } from "./agent-action-executor";
 import { downgradeCloseToHold, downgradeMergeToHold, isProtectedAutomationAuthor, type PlannedAgentAction } from "../settings/agent-actions";
+import { findBlacklistEntry } from "../settings/contributor-blacklist";
 import { isCloseHoldOnly, isHoldOnly } from "../review/outcomes-wire";
 import { fetchLiveCiAggregate, fetchLivePullRequestMergeState, fetchLivePullRequestReviewDecision } from "../github/backfill";
 import { githubRateLimitAdmissionKeyForToken } from "../github/client";
@@ -60,20 +61,23 @@ export async function decidePendingAgentAction(env: Env, input: { id: string; de
     });
     return { status: "rejected", action: { ...pending, status: "rejected", decidedBy: input.decidedBy }, executionOutcome: "head_moved" };
   }
-  // An unpinned staged approve or merge (no expectedHeadSha) cannot be safety-verified against a force-push that
-  // happened during the queue wait. For a PINNED merge, GitHub's `sha` param 409s on mismatch -- a real backstop.
-  // But that backstop only exists because there's something to compare against; an UNPINNED merge falls back to
-  // performAction's `mergeSha = action.expectedHeadSha ?? ctx.headSha`, which by construction substitutes
-  // whatever head is live right now, so it trivially "matches" and no 409 is possible. The reviews API's
-  // `commit_id` has no server-side staleness rejection at all, pinned or not (#2377). Either way, the check above
-  // only fires when a pin EXISTS and disagrees with the live head; a row staged with no pin at all (e.g. by code
-  // predating this head-pinning fix, or a planning pass that ran against a transiently-null stored head SHA)
-  // would otherwise fall through to the executor's `ctx.headSha` fallback and silently ratify whatever commit is
-  // live NOW, under the authority of a review/merge that was never actually performed against it (#2422).
+  // An unpinned staged approve, merge, or close (no expectedHeadSha) cannot be safety-verified against a
+  // force-push that happened during the queue wait. For a PINNED merge, GitHub's `sha` param 409s on mismatch --
+  // a real backstop. But that backstop only exists because there's something to compare against; an UNPINNED
+  // merge falls back to performAction's `mergeSha = action.expectedHeadSha ?? ctx.headSha`, which by construction
+  // substitutes whatever head is live right now, so it trivially "matches" and no 409 is possible. The reviews
+  // API's `commit_id` has no server-side staleness rejection at all, pinned or not (#2377). close has no
+  // server-side commit target at all -- its OWN freshness relies entirely on this application-level pin, since
+  // closePullRequest doesn't take a sha the way merge/reviews do. Either way, the check above only fires when a
+  // pin EXISTS and disagrees with the live head; a row staged with no pin at all (e.g. by code predating this
+  // head-pinning fix, or a planning pass that ran against a transiently-null stored head SHA) would otherwise
+  // fall through to the executor's `ctx.headSha` fallback and silently ratify whatever commit is live NOW, under
+  // the authority of a review/merge/close that was never actually performed against it (#2422, #2452).
   // dismissStaleApproval is exempt: it RETRACTS the bot's existing approval rather than granting a new one at a
   // specific commit, so it carries no "ratify unreviewed code" risk and is safe to replay unpinned.
   const isUnpinnedRatifyingAction =
-    !stagedHead && ((pending.actionClass === "approve" && !pending.params.dismissStaleApproval) || pending.actionClass === "merge");
+    !stagedHead &&
+    ((pending.actionClass === "approve" && !pending.params.dismissStaleApproval) || pending.actionClass === "merge" || pending.actionClass === "close");
   if (isUnpinnedRatifyingAction) {
     await setPendingAgentActionStatus(env, pending.id, { status: "rejected", decidedBy: input.decidedBy });
     await recordAuditEvent(env, {
@@ -85,6 +89,83 @@ export async function decidePendingAgentAction(env: Env, input: { id: string; de
       metadata: baseMetadata,
     });
     return { status: "rejected", action: { ...pending, status: "rejected", decidedBy: input.decidedBy }, executionOutcome: "unpinned_legacy_action" };
+  }
+
+  // Re-resolve blacklist membership live at accept time (#2452). The head-SHA pin above only catches a
+  // FORCE-PUSH; it says nothing about whether the contributor is STILL blacklisted, and a blacklist close is a
+  // sticky auto_with_approval row with no expiry -- a maintainer can remove the entry (or edit .gittensory.yml)
+  // at any point while it sits waiting. `settings` was fetched fresh at the top of this function, so this
+  // mirrors the exact same pure check the planner uses (processors.ts), just re-run against CURRENT config.
+  if (pending.actionClass === "close" && pending.params.closeKind === "blacklist" && pr) {
+    const stillBlacklisted = findBlacklistEntry(pr.authorLogin, settings.contributorBlacklist) !== null;
+    if (!stillBlacklisted) {
+      await setPendingAgentActionStatus(env, pending.id, { status: "rejected", decidedBy: input.decidedBy });
+      await recordAuditEvent(env, {
+        eventType: "agent.pending_action.superseded",
+        actor: input.decidedBy,
+        targetKey,
+        outcome: "denied",
+        detail: "superseded blacklist close: contributor is no longer on the blacklist",
+        metadata: baseMetadata,
+      });
+      return { status: "rejected", action: { ...pending, status: "rejected", decidedBy: input.decidedBy }, executionOutcome: "no_longer_blacklisted" };
+    }
+  }
+
+  // Re-validate a staged CLOSE tagged "linked-issue-hard-rule" against the CURRENT hard-rule state (flagged by
+  // the gate's own review of #2452, twice). Mirrors the blacklist re-check above: the head-SHA pin only catches
+  // a force-push, not a maintainer relabeling/reassigning the linked issue (or editing hard-rule config) while
+  // the close sits waiting in the queue -- head SHA unchanged, so the pin doesn't catch it. Unlike the merge
+  // re-check below (which supersedes a merge when the rule BECOMES violated), this close was staged BECAUSE the
+  // rule WAS violated, so this supersedes it when the rule is NO LONGER violated -- the close's own justification
+  // evaporated. Also re-derives closeEligible (mirrors the merge re-check's own closeEligible below): the planner
+  // confirmed eligibility at STAGING time, but settings.closeOwnerAuthors is a live toggle that can flip to false
+  // between staging and accept without moving the head SHA, same staleness class as the rule check itself -- an
+  // owner PR staged for close while the setting was true must not still close after it is turned off.
+  if (pending.actionClass === "close" && pending.params.closeKind === "linked-issue-hard-rule" && pr) {
+    const repoOwner = pending.repoFullName.includes("/") ? pending.repoFullName.slice(0, pending.repoFullName.indexOf("/")) : "";
+    const authorLogin = pr.authorLogin ?? "";
+    const authorIsOwner = authorLogin.length > 0 && authorLogin.toLowerCase() === repoOwner.toLowerCase();
+    const authorIsAutomationBot = isProtectedAutomationAuthor(pr.authorLogin);
+    const closeEligible = (!authorIsOwner && !authorIsAutomationBot) || (authorIsOwner && settings.closeOwnerAuthors === true);
+    let stillJustified = closeEligible;
+    if (closeEligible) {
+      const linkedIssueRulesConfig = await loadLinkedIssueHardRules(env, pending.repoFullName);
+      // Best-effort mint, same fail-open contract as the merge re-check below (#2126/#2132): a failed mint or a
+      // resolution that can't gather issue facts falls back to resolveLinkedIssueHardRule's own "not violated"
+      // default, which this check then treats as "the close is no longer justified" -- the SAFE direction for an
+      // irreversible close (superseding it re-stages from a fresh sweep instead of risking a wrongful auto-close).
+      const ciToken = await createInstallationToken(env, pending.installationId).catch(() => undefined);
+      const linkedIssueHardRule = await resolveLinkedIssueHardRule({
+        env,
+        repoFullName: pending.repoFullName,
+        repoOwner,
+        config: linkedIssueRulesConfig,
+        body: pr.body,
+        linkedIssues: pr.linkedIssues,
+        ciToken,
+        installationId: pending.installationId,
+      });
+      stillJustified = linkedIssueHardRule?.violated === true;
+    }
+    if (!stillJustified) {
+      await setPendingAgentActionStatus(env, pending.id, { status: "rejected", decidedBy: input.decidedBy });
+      await recordAuditEvent(env, {
+        eventType: "agent.pending_action.superseded",
+        actor: input.decidedBy,
+        targetKey,
+        outcome: "denied",
+        detail: closeEligible
+          ? "superseded linked-issue hard-rule close: the linked issue is no longer ineligible"
+          : "superseded linked-issue hard-rule close: the author is no longer close-eligible (owner/automation exemption now applies)",
+        metadata: baseMetadata,
+      });
+      return {
+        status: "rejected",
+        action: { ...pending, status: "rejected", decidedBy: input.decidedBy },
+        executionOutcome: closeEligible ? "linked_issue_no_longer_violated" : "no_longer_close_eligible",
+      };
+    }
   }
 
   // Re-derive live justification for a staged MERGE at accept time. auto_with_approval rows have no expiry, so
