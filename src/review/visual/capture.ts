@@ -28,6 +28,7 @@ const DEFAULT_ROUTE_FILE = /apps\/gittensory-ui\/src\/routes\/(.+?)\.(?:tsx|jsx)
 // Each route renders desktop + mobile for before + after (up to 4 PNGs). Cap routes to bound browser-render
 // wall-clock — Browser Rendering is the costliest binding.
 const MAX_ROUTES = 2;
+const MAX_CONFIGURED_ROUTES = 5;
 
 /** A single captured route's before/after shot URLs (desktop + mobile), plus an optional pixel-diff overlay
  *  per viewport (#3674) — self-host only (isVisualDiffAvailable), and only when the diff clears the visual-
@@ -118,7 +119,7 @@ export type VisualRoutesInput = { paths?: readonly string[] | null | undefined; 
  * `maxRoutes` applies to either path — an explicit list is capped too, not just inferred routes.
  */
 export function resolveVisualRoutes(files: string[], config?: VisualRoutesInput | null): string[] {
-  const maxRoutes = config?.maxRoutes && config.maxRoutes > 0 ? config.maxRoutes : MAX_ROUTES;
+  const maxRoutes = config?.maxRoutes && config.maxRoutes > 0 ? Math.min(config.maxRoutes, MAX_CONFIGURED_ROUTES) : MAX_ROUTES;
   if (config?.paths && config.paths.length > 0) return [...config.paths].slice(0, maxRoutes);
   return mapFilesToRoutes(files, DEFAULT_ROUTE_FILE, maxRoutes);
 }

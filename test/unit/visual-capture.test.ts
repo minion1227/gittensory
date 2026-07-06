@@ -347,6 +347,23 @@ describe("resolveVisualRoutes (#3610)", () => {
     expect(resolveVisualRoutes(manyFiles, { paths: ["/a", "/b", "/c"], maxRoutes: 2 })).toEqual(["/a", "/b"]);
   });
 
+  it("clamps oversized configured maxRoutes to the safe visual route limit", () => {
+    const sixFiles = [
+      ...manyFiles,
+      "apps/gittensory-ui/src/routes/app.settings.tsx",
+      "apps/gittensory-ui/src/routes/app.usage.tsx",
+      "apps/gittensory-ui/src/routes/app.users.tsx",
+    ];
+    expect(resolveVisualRoutes(sixFiles, { maxRoutes: 1000 })).toEqual([
+      "/app",
+      "/app/analytics",
+      "/app/billing",
+      "/app/settings",
+      "/app/usage",
+    ]);
+    expect(resolveVisualRoutes(sixFiles, { paths: ["/a", "/b", "/c", "/d", "/e", "/f"], maxRoutes: 1000 })).toEqual(["/a", "/b", "/c", "/d", "/e"]);
+  });
+
   it("a maxRoutes of zero or negative falls back to the built-in default cap", () => {
     expect(resolveVisualRoutes(manyFiles, { maxRoutes: 0 })).toEqual(["/app", "/app/analytics"]);
     expect(resolveVisualRoutes(manyFiles, { maxRoutes: -1 })).toEqual(["/app", "/app/analytics"]);

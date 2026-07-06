@@ -1106,6 +1106,16 @@ function normalizeOptionalPositiveInteger(value: JsonValue | undefined, field: s
   return null;
 }
 
+const REVIEW_VISUAL_MAX_ROUTES_LIMIT = 5;
+
+function normalizeOptionalVisualMaxRoutes(value: JsonValue | undefined, warnings: string[]): number | null {
+  const maxRoutes = normalizeOptionalPositiveInteger(value, "review.visual.routes.max_routes", warnings);
+  if (maxRoutes === null) return null;
+  if (maxRoutes <= REVIEW_VISUAL_MAX_ROUTES_LIMIT) return maxRoutes;
+  warnings.push(`Manifest field "review.visual.routes.max_routes" must be at most ${REVIEW_VISUAL_MAX_ROUTES_LIMIT}; clamping it.`);
+  return REVIEW_VISUAL_MAX_ROUTES_LIMIT;
+}
+
 /** Normalize + bound a maintainer-supplied glob string: trims/length-caps like any other string field, AND
  *  rejects one globToRegExp (review/content-lane/spec-resolver.ts's reuse of the guardrail-path compiler) would
  *  itself refuse to compile safely. Reuses `hasUnsafeWildcardCount` — globToRegExp's OWN safety predicate —
@@ -1933,7 +1943,7 @@ function parseVisualConfig(value: JsonValue | undefined, warnings: string[]): Vi
     warnings.push(`Manifest "review.visual.routes" must be a mapping; ignoring it.`);
   }
   const paths = routesRecord ? parseManifestGlobList(routesRecord.paths, "review.visual.routes.paths", warnings) : [];
-  const maxRoutes = routesRecord ? normalizeOptionalPositiveInteger(routesRecord.max_routes, "review.visual.routes.max_routes", warnings) : null;
+  const maxRoutes = routesRecord ? normalizeOptionalVisualMaxRoutes(routesRecord.max_routes, warnings) : null;
 
   const themes = parseVisualThemes(record.themes, warnings);
 

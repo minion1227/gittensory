@@ -3419,6 +3419,13 @@ describe("review.visual (#3609 preview.url_template / #3610 routes)", () => {
     expect(negative.review.visual.routes.maxRoutes).toBeNull();
   });
 
+  it("clamps max_routes above the safe visual route limit with a warning", () => {
+    const m = parseFocusManifest({ review: { visual: { routes: { max_routes: 1000 } } } });
+    expect(m.review.visual.routes.maxRoutes).toBe(5);
+    expect(m.warnings.some((w) => /review\.visual\.routes\.max_routes.*at most 5/.test(w))).toBe(true);
+    expect(reviewConfigToJson(m.review)).toEqual({ visual: { routes: { max_routes: 5 } } });
+  });
+
   it("marks present via routes.paths alone (preview + max_routes both empty)", () => {
     const m = parseFocusManifest({ review: { visual: { routes: { paths: ["/app"] } } } });
     expect(m.review.present).toBe(true);
