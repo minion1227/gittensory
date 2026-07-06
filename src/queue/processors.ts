@@ -9598,6 +9598,7 @@ async function maybePublishPrPublicSurface(
         ...(findingCategoriesEnabledForReview && aiReview?.inlineFindings?.length
           ? { findingCategories: aiReview.inlineFindings }
           : {}),
+        maxFindingsCaps: reviewConfig.maxFindings,
       });
     } else {
       deterministicBody = buildPublicPrIntelligenceComment(commentArgs);

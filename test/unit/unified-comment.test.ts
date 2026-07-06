@@ -5,6 +5,7 @@ import {
   type DualReviewNote,
   renderReviewingPlaceholder,
   renderUnifiedReviewComment,
+  truncateFindingsForDisplay,
   type ReviewNotes,
   type ReviewRecommendation,
   shouldPostReviewingPlaceholder,
@@ -489,6 +490,17 @@ describe("buildUnifiedReviewInput", () => {
     const withoutEffort = buildUnifiedReviewInput({ changedFiles: 1, reviews: [reviewNote("merge")] });
     expect(withoutEffort.reviewEffort).toBeUndefined();
   });
+
+  it("threads optional maxFindingsCaps through to the input when provided (#2049)", () => {
+    const withCaps = buildUnifiedReviewInput({
+      changedFiles: 1,
+      reviews: [reviewNote("merge")],
+      maxFindingsCaps: { blockers: 2, nits: 3 },
+    });
+    expect(withCaps.maxFindingsCaps).toEqual({ blockers: 2, nits: 3 });
+    const withoutCaps = buildUnifiedReviewInput({ changedFiles: 1, reviews: [reviewNote("merge")] });
+    expect(withoutCaps.maxFindingsCaps).toBeUndefined();
+  });
 });
 
 describe("renderReviewingPlaceholder", () => {
@@ -531,6 +543,61 @@ describe("renderReviewingPlaceholder", () => {
     expect(body).toContain("🟦");
     expect(body).toContain("🟨");
     expect(body).toContain("🟥");
+  });
+});
+
+describe("review.max_findings display caps (#2049)", () => {
+  it("truncates blockers and nits with a +N more footer while keeping the full blocker chip count", () => {
+    const capped = renderUnifiedReviewComment({
+      ...base,
+      recommendations: ["request_changes"],
+      blockers: ["alpha blocker", "beta blocker", "gamma blocker"],
+      nits: ["nit one", "nit two"],
+      maxFindingsCaps: { blockers: 1, nits: 1 },
+    });
+    expect(capped).toContain("- alpha blocker");
+    expect(capped).not.toContain("- beta blocker");
+    expect(capped).toContain("+2 more");
+    expect(capped).toContain("`3 blockers`");
+    expect(capped).toContain("+1 more");
+  });
+
+  it("is byte-identical when caps are unset", () => {
+    const input = { ...base, nits: ["hint"], blockers: ["must fix"] };
+    expect(renderUnifiedReviewComment(input)).toBe(
+      renderUnifiedReviewComment({ ...input, maxFindingsCaps: { blockers: null, nits: null } }),
+    );
+  });
+
+  it("truncateFindingsForDisplay handles nullish, undefined, under-cap, and zero caps", () => {
+    expect(truncateFindingsForDisplay(["a", "b"], null)).toEqual({ shown: ["a", "b"], hiddenCount: 0 });
+    expect(truncateFindingsForDisplay(["a", "b"], undefined)).toEqual({ shown: ["a", "b"], hiddenCount: 0 });
+    expect(truncateFindingsForDisplay(["a"], 5)).toEqual({ shown: ["a"], hiddenCount: 0 });
+    expect(truncateFindingsForDisplay(["a", "b"], 1)).toEqual({ shown: ["a"], hiddenCount: 1 });
+    expect(truncateFindingsForDisplay(["a", "b"], 0)).toEqual({ shown: [], hiddenCount: 2 });
+  });
+
+  it("renders cap=0 as a +N more placeholder without listing items", () => {
+    const capped = renderUnifiedReviewComment({
+      ...base,
+      recommendations: ["request_changes"],
+      blockers: ["alpha", "beta"],
+      nits: ["nit one"],
+      maxFindingsCaps: { blockers: 0, nits: 0 },
+    });
+    expect(capped).not.toContain("- alpha");
+    expect(capped).toContain("_+2 more_");
+    expect(capped).toContain("_+1 more_");
+  });
+
+  it("omits the +N more footer when the list fits within the cap", () => {
+    const capped = renderUnifiedReviewComment({
+      ...base,
+      nits: ["only nit"],
+      maxFindingsCaps: { blockers: null, nits: 5 },
+    });
+    expect(capped).toContain("only nit");
+    expect(capped).not.toMatch(/\+1 more/);
   });
 });
 
