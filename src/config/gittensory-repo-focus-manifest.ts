@@ -67,6 +67,11 @@ gate:
 # formal GitHub assignee of the issue — our issues are almost always maintainer-authored for open pickup and
 # rarely formally assigned. priority intentionally omits the flag: it is the scarce, maintainer-hand-picked
 # reward label, and must still require the PR author to be the issue's actual author/assignee.
+#
+# Review-evasion protection: closing or converting-to-draft your OWN PR while gittensory has an active
+# review pass running, a prior recorded gate failure, or a repeated ready<->draft cycle on this PR, is
+# treated as dodging the one-shot review rather than an ordinary action (layered OVER the dashboard's
+# own default of "off").
 settings:
   linkedIssueLabelPropagation:
     enabled: true
@@ -83,6 +88,7 @@ settings:
       - issueLabel: "gittensor:priority"
         prLabel: "gittensor:priority"
         removeOtherTypeLabels: true
+  reviewEvasionProtection: close
 
 # Repo-doc generation roadmap (#2993/#3002) — opt-in only, off by default. Uncomment to let Gittensory open a
 # PR generating AGENTS.md/CLAUDE.md from this repo's own profile.
