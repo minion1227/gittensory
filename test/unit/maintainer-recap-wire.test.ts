@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isRecapEnabled, resolveMaintainerRecapManifestOverride, runMaintainerRecapJob, shouldFireMaintainerRecap } from "../../src/review/maintainer-recap-wire";
+import type { MaintainerRecapJobSkipped } from "../../src/review/maintainer-recap-wire";
 import type { RunMaintainerRecapResult } from "../../src/services/maintainer-recap";
 import { updatePullRequestSlopAssessment, upsertPullRequestFromGitHub, upsertRepositorySettings } from "../../src/db/repositories";
 import { upsertRepoFocusManifest } from "../../src/signals/focus-manifest-loader";
@@ -9,7 +10,9 @@ const SELF_REPO = "JSONbored/gittensory";
 
 const HOOK = "https://discord.com/api/webhooks/123/abc";
 
-function ranRecap(result: RunMaintainerRecapResult): Extract<RunMaintainerRecapResult, { skipped: false }> {
+function ranRecap(
+  result: MaintainerRecapJobSkipped | RunMaintainerRecapResult,
+): Extract<RunMaintainerRecapResult, { skipped: false }> {
   expect(result.skipped).toBe(false);
   if (result.skipped) throw new Error("expected recap job to run");
   return result;
@@ -194,7 +197,8 @@ describe("runMaintainerRecapJob — cross-repo digest (#1963, #2248)", () => {
 
     const { report } = ranRecap(await runMaintainerRecapJob(env, 30));
 
-    expect(report.windowDays).toBe(30);
+    expect(report).not.toBeNull();
+    expect(report!.windowDays).toBe(30);
   });
 
   it("prefers agent-configured repos over the full registered set when at least one is configured", async () => {
@@ -208,7 +212,8 @@ describe("runMaintainerRecapJob — cross-repo digest (#1963, #2248)", () => {
 
     const { report } = ranRecap(await runMaintainerRecapJob(env));
 
-    expect(report.repos.map((r) => r.repoFullName)).toEqual(["owner/configured"]);
+    expect(report).not.toBeNull();
+    expect(report!.repos.map((r) => r.repoFullName)).toEqual(["owner/configured"]);
   });
 
   it("falls back to every registered repo when settings resolution errors for every repo (a settings blip must not abort the scan)", async () => {
@@ -224,7 +229,8 @@ describe("runMaintainerRecapJob — cross-repo digest (#1963, #2248)", () => {
 
     const { report } = ranRecap(await runMaintainerRecapJob(env));
 
-    expect(report.repos.map((r) => r.repoFullName).sort()).toEqual(["owner/alpha", "owner/beta"]);
+    expect(report).not.toBeNull();
+    expect(report!.repos.map((r) => r.repoFullName).sort()).toEqual(["owner/alpha", "owner/beta"]);
   });
 
   it("fails safe per-repo: an aggregator error is logged and the repo is skipped; the job still delivers a (zeroed) report", async () => {
@@ -255,5 +261,76 @@ describe("runMaintainerRecapJob — cross-repo digest (#1963, #2248)", () => {
     expect(report.totals.gateFalsePositiveRate).toBeNull();
     expect(delivery.discord).toEqual({ sent: true });
     expect(delivery.slack.sent).toBe(false);
+  });
+
+  it("a retried tick within the SAME UTC date is a no-op: no repo scan, no second Discord post (#2249)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T14:00:00.000Z"));
+    const env = createTestEnv({ DISCORD_WEBHOOK_URL: HOOK });
+    await seedRegisteredRepo(env, "owner/alpha");
+    await seedMergedPr(env, "owner/alpha", 1);
+    const posted = stubDiscordFetch();
+
+    const first = ranRecap(await runMaintainerRecapJob(env));
+    vi.setSystemTime(new Date("2026-07-09T14:02:00.000Z")); // same UTC date, a couple minutes later (a retry)
+    const second = await runMaintainerRecapJob(env);
+
+    expect(first.delivery.discord).toEqual({ sent: true });
+    expect(second).toEqual({ skipped: true, reason: "already_sent_this_period" });
+    expect(posted).toHaveLength(1); // the retry never re-scanned repos or re-posted
+    vi.useRealTimers();
+  });
+
+  it("a tick on a DIFFERENT UTC date gets its own fresh claim and sends again (#2249)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T14:00:00.000Z"));
+    const env = createTestEnv({ DISCORD_WEBHOOK_URL: HOOK });
+    await seedRegisteredRepo(env, "owner/alpha");
+    await seedMergedPr(env, "owner/alpha", 1);
+    const posted = stubDiscordFetch();
+
+    const first = ranRecap(await runMaintainerRecapJob(env));
+    vi.setSystemTime(new Date("2026-07-10T14:00:00.000Z")); // next day
+    const second = ranRecap(await runMaintainerRecapJob(env));
+
+    expect(first.delivery.discord).toEqual({ sent: true });
+    expect(second.delivery.discord).toEqual({ sent: true });
+    expect(posted).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  it("records a maintainer_recap_generated audit event with cadence/windowDays/repoCount/sectionCount/channelsAttempted metadata (#2251)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T14:00:00.000Z"));
+    const env = createTestEnv({ DISCORD_WEBHOOK_URL: HOOK, GITTENSORY_RECAP_CADENCE: "daily" });
+    await seedRegisteredRepo(env, "owner/alpha");
+    await seedMergedPr(env, "owner/alpha", 1);
+    stubDiscordFetch();
+
+    await runMaintainerRecapJob(env, 14);
+
+    const row = await env.DB.prepare("select target_key, outcome, detail, metadata_json from audit_events where event_type = ? order by created_at desc limit 1")
+      .bind("maintainer_recap_generated")
+      .first<{ target_key: string; outcome: string; detail: string; metadata_json: string }>();
+    expect(row).toMatchObject({ target_key: "maintainer-recap:2026-07-09", outcome: "success" });
+    expect(row!.detail).toContain("1 repo(s)");
+    const metadata = JSON.parse(row!.metadata_json);
+    expect(metadata).toEqual({ cadence: "daily", windowDays: 14, repoCount: 1, sectionCount: expect.any(Number), channelsAttempted: ["discord", "slack"] });
+    vi.useRealTimers();
+  });
+
+  it("a present manifest override's cadence is reflected in the maintainer_recap_generated audit metadata, not the env value", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T14:00:00.000Z"));
+    const env = createTestEnv({ DISCORD_WEBHOOK_URL: HOOK, GITTENSORY_RECAP_CADENCE: "weekly" });
+    stubDiscordFetch();
+
+    await runMaintainerRecapJob(env, undefined, { present: true, enabled: true, cadence: "daily" });
+
+    const row = await env.DB.prepare("select metadata_json from audit_events where event_type = ? order by created_at desc limit 1")
+      .bind("maintainer_recap_generated")
+      .first<{ metadata_json: string }>();
+    expect(JSON.parse(row!.metadata_json).cadence).toBe("daily");
+    vi.useRealTimers();
   });
 });
