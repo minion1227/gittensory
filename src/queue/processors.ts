@@ -65,10 +65,11 @@ import {
   countRecentAuditEventsForActorInRepo,
   countRecentAuditEventsForActorInRepoWithTargetSuffix,
   hasAuditEventForDelivery,
+  hasAuditEventForHeadSha,
   recordGateBlockOutcome,
   getGateBlockOutcome,
   hasActiveReviewForHeadSha,
-  isGlobalAgentFrozen,
+  isDbFrozenForRepo,
   listReviewSuppressions,
   markGateOutcomeOverridden,
   markPullRequestLinkedIssueHardRuleViolated,
@@ -389,6 +390,7 @@ import {
   VISUAL_VISION_SYSTEM_PROMPT,
 } from "../review/visual/visual-findings";
 import { incr } from "../selfhost/metrics";
+import { withAdvisoryAiEnv } from "../selfhost/ai";
 import {
   renderReviewingPlaceholder,
   shouldPostReviewingPlaceholder,
@@ -1805,7 +1807,7 @@ async function sweepRepoRegate(
   )
     return;
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)), // env brake OR DB kill-switch (#audit-§5.2)
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)), // env brake OR DB kill-switch (#audit-§5.2)
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -2126,7 +2128,7 @@ async function sweepRepoBacklogConvergence(
   const settings = await resolveRepositorySettings(env, repoFullName);
   if (!(isConvergenceRepoAllowed(env, repoFullName) || isAgentConfigured(settings.autonomy))) return;
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -2905,7 +2907,7 @@ async function runAgentMaintenancePlanAndExecute(
     }
     if (isNewAccount && resolveAutonomy(settings.autonomy, "review_state_label") === "auto") {
       const newAccountMode = resolveAgentActionMode({
-        globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+        globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
         agentPaused: settings.agentPaused,
         agentDryRun: settings.agentDryRun,
       });
@@ -3267,6 +3269,7 @@ async function runAgentMaintenancePlanAndExecute(
       autonomy: settings.autonomy,
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
+      agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
       installationPermissions,
       authorLogin: pr.authorLogin,
       mergeTrainMode: settings.mergeTrainMode,
@@ -3583,6 +3586,7 @@ async function prReadyForReview(
         autonomy: settings.autonomy,
         agentPaused: settings.agentPaused,
         agentDryRun: settings.agentDryRun,
+        agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
         installationPermissions: installation?.permissions ?? null,
         authorLogin: pr.authorLogin,
       },
@@ -3854,6 +3858,7 @@ async function maybeForceFreshRebase(
       autonomy: settings.autonomy,
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
+      agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
       /* v8 ignore next -- an installed-App PR webhook always carries an installation record; the null is defensive (mirrors runAgentMaintenancePlanAndExecute's own identical merge-time read). */
       installationPermissions: installation?.permissions ?? null,
       authorLogin: pr.authorLogin,
@@ -5387,6 +5392,7 @@ async function maybeCloseIssueOverContributorCap(
             autonomy: settings.autonomy,
             agentPaused: settings.agentPaused,
             agentDryRun: settings.agentDryRun,
+            agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
             authorLogin,
             moderationSettings: { moderationGateMode: settings.moderationGateMode, moderationRules: settings.moderationRules, moderationWarningLabel: settings.moderationWarningLabel, moderationBannedLabel: settings.moderationBannedLabel },
           },
@@ -5469,6 +5475,7 @@ async function maybeCloseIssueOverContributorCap(
         autonomy: settings.autonomy,
         agentPaused: settings.agentPaused,
         agentDryRun: settings.agentDryRun,
+        agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
         authorLogin,
         moderationSettings: { moderationGateMode: settings.moderationGateMode, moderationRules: settings.moderationRules, moderationWarningLabel: settings.moderationWarningLabel, moderationBannedLabel: settings.moderationBannedLabel },
       },
@@ -6292,7 +6299,7 @@ async function processGitHubWebhook(
           if (await isBelowAccountAgeThreshold(env, installationId, authorLogin, accountAgeThresholdDays)) {
             if (resolveAutonomy(issueSettings.autonomy, "review_state_label") === "auto") {
               const newAccountMode = resolveAgentActionMode({
-                globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+                globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, issueSettings.agentGlobalFreezeOverride)),
                 agentPaused: issueSettings.agentPaused,
                 agentDryRun: issueSettings.agentDryRun,
               });
@@ -6921,7 +6928,7 @@ export async function resolveAutoReviewSkipForPullRequest(
   if (args.authorBlacklisted || args.isFrozenForManualReview) {
     return { skipReason: null, reviewManifest };
   }
-  const reviewedCommitCount = await countPublishedAiReviewHeads(env, args.repoFullName, args.pr.number, args.headSha).catch(() => 0);
+  const reviewedCommitCount = await countPublishedAiReviewHeads(env, args.repoFullName, args.pr.number).catch(() => 0);
   const skipReason = resolvePullRequestAutoReviewSkipReason({
     forceAiReview: args.forceAiReview,
     manifest: reviewManifest,
@@ -7737,7 +7744,7 @@ export async function runAiSlopForAdvisory(
         /* v8 ignore next -- reached only past this function's own `!args.advisory.headSha` early return, so headSha is always truthy here; the `?? null` is a type-level fallback for an unreachable branch. */
         metadata: { repoFullName: args.repoFullName, headSha: args.advisory.headSha ?? null },
       }).catch(() => undefined);
-      result = await runGittensoryAiSlopAdvisory(env, {
+      result = await runGittensoryAiSlopAdvisory(withAdvisoryAiEnv(env, args.settings.advisoryAiRouting?.slop === true), {
         repoFullName: args.repoFullName,
         prNumber: args.pr.number,
         title: args.pr.title,
@@ -8180,6 +8187,40 @@ class RetryablePublicSurfacePublishFailedError extends RetryableJobError {
   }
 }
 
+/** A vision-capable self-host provider's `.run()` — mirrors ai-slop.ts's `AiRunner` (same loose shape for a
+ *  `env.AI`-family binding called outside the SelfHostAi/RagInfra type boundaries), scoped locally since it
+ *  is not exported. */
+type SelfHostVisionRunner = { run?: (model: string, options: Record<string, unknown>) => Promise<unknown> };
+
+/** Self-host local vision (#4335): calls the dedicated `env.AI_VISION` binding (ollama + a vision-language
+ *  model) the SAME way `env.AI_EMBED` is called for embeddings — a binding kept separate from the review
+ *  chain so a vision request never competes with/degrades review-model routing. The `model` argument is a
+ *  placeholder: `createOpenAiCompatibleAi`'s chat path prefers its own construction-time-configured model
+ *  (AI_VISION_MODEL) over whatever string is passed here (see `resolveModel` in `selfhost/ai.ts`). Fail-safe
+ *  on every path, exactly like `callAiProvider`'s BYOK sibling: no binding / no `.run` / a thrown error / an
+ *  unparseable response all degrade to `null`, never a thrown error reaching the caller. */
+async function runSelfHostVisualVision(env: Env, system: string, user: string, images: readonly AiContentBlock[]): Promise<string | null> {
+  const ai = env.AI_VISION as unknown as SelfHostVisionRunner | undefined;
+  if (!ai || typeof ai.run !== "function") return null;
+  try {
+    const result = (await ai.run("visual-vision", {
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: [{ type: "text", text: user }, ...images] },
+      ],
+      max_tokens: 600,
+      // Bounds per-request KV cache on a concurrency-constrained GPU (#4327/#4335 concurrency tuning docs
+      // this exact figure) -- without a cap, vision's larger-than-text context can exhaust VRAM under
+      // concurrent load faster than the embed model does, degrading to latency collapse rather than a clean
+      // OOM. Ignored by every non-Ollama provider (embeddings, subscription CLIs, Anthropic).
+      providerOptions: { num_ctx: 4096 },
+    })) as { response?: string } | null;
+    return result?.response?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * AI-vision analysis of a confirmed visual regression (#4111 wiring): the existing pixel-diff threshold can
  * tell "the pixels changed" but not "does it look broken" — a route the capture pipeline already flagged
@@ -8220,17 +8261,22 @@ export async function runVisualVisionForAdvisory(
             model: args.settings.aiReviewModel ?? storedVisionKey.model,
           }
         : null;
+    // Self-host local vision (#4335): a dedicated ollama+VLM binding lets vision run WITHOUT a maintainer
+    // BYOK key -- see evaluateVisualVisionGate's header for why only an HTTP-capable provider (BYOK or this)
+    // can see the screenshots at all.
+    const selfHostVisionAvailable = Boolean(env.AI_VISION);
     const visionGate = evaluateVisualVisionGate({
       routes: args.routes,
       reputationSignal: visionReputation.signal,
       providerKey: visionProviderKey,
+      selfHostVisionAvailable,
     });
     if (!visionGate.run) return;
-    // evaluateVisualVisionGate only ever returns run:true when its own providerKey input (the SAME
-    // visionProviderKey resolved above) was non-null -- this is a defensive type-narrowing guard for the
-    // callAiProvider call below, not a reachable false case.
-    /* v8 ignore next -- see comment above */
-    if (!visionProviderKey) return;
+    // evaluateVisualVisionGate only ever returns run:true when providerKey OR selfHostVisionAvailable (the
+    // SAME two values resolved above) was truthy -- this is a defensive type-narrowing guard, not a reachable
+    // false case: if neither is set here, the gate itself would already have returned run:false above.
+    /* v8 ignore next 2 -- see comment above */
+    if (!visionProviderKey && !selfHostVisionAvailable) return;
     const images: AiContentBlock[] = [];
     for (const route of visionGate.routes) {
       // Show the model the viewport that actually crossed the pixel-diff threshold — a route can qualify via
@@ -8249,15 +8295,18 @@ export async function runVisualVisionForAdvisory(
       if (afterBlock) images.push(afterBlock);
     }
     if (images.length === 0) return;
-    const visionResponse = await callAiProvider(
-      visionProviderKey,
-      VISUAL_VISION_SYSTEM_PROMPT,
-      buildVisualVisionUserPrompt(visionGate.routes),
-      600,
-      images,
-    );
-    if (!visionResponse.text) return;
-    const visionFindings = parseVisualVisionResponse(visionResponse.text);
+    // BYOK (a maintainer's own anthropic/openai key) takes priority when both are configured -- matches
+    // every other dual-path AI call site's convention (BYOK bills the maintainer's own account, so it's
+    // preferred over the shared/free local resource when the operator has explicitly set one up).
+    let visionText: string | null;
+    if (visionProviderKey) {
+      const visionResponse = await callAiProvider(visionProviderKey, VISUAL_VISION_SYSTEM_PROMPT, buildVisualVisionUserPrompt(visionGate.routes), 600, images);
+      visionText = visionResponse.text;
+    } else {
+      visionText = await runSelfHostVisualVision(env, VISUAL_VISION_SYSTEM_PROMPT, buildVisualVisionUserPrompt(visionGate.routes), images);
+    }
+    if (!visionText) return;
+    const visionFindings = parseVisualVisionResponse(visionText);
     args.advisory.findings.push(...buildVisualRegressionFindings(visionFindings));
   } catch (error) {
     console.log(
@@ -9102,6 +9151,48 @@ async function maybePublishPrPublicSurface(
         if (!policyCodes.has(finding.code)) continue;
         advisory.findings.push(publicSafeManifestPolicyFinding(finding));
       }
+      // E2E test-generation auto-trigger (#4196, part of the #4189 epic): promotes the deterministic
+      // manifest_missing_tests finding above from advisory-only text into an actual trigger for #4192/#4194's
+      // generation-and-render path -- additive to, never a replacement for, the explicit `@gittensory
+      // generate-tests` command (#4195), which stays available regardless of whether this signal fired.
+      // Filters the SAME guidance.findings just computed above rather than re-deriving "PR probably needs
+      // tests" from scratch, per the issue's own requirement -- this is why the auto-trigger lives inside this
+      // exact manifestPolicyGateMode-gated block instead of a parallel code path: that is the only place this
+      // finding is computed at all today.
+      if (pr.headSha && guidance.findings.some((finding) => finding.code === "manifest_missing_tests") && resolveConvergedFeature(env, manifest, "e2eTests", repoFullName)) {
+        const e2eTargetKey = `${repoFullName}#${pr.number}`;
+        // Double-generation guard: an unchanged head SHA re-entering this pass (a re-review/sweep tick, not a
+        // new push) must never re-spend an LLM call or repost a duplicate suggestion. A genuinely NEW push
+        // (a new head SHA) is always a fresh miss here regardless of how many prior SHAs already fired. The
+        // explicit command deliberately does NOT consult this guard -- a maintainer typing the command always
+        // gets a fresh generation, even on a SHA the auto-trigger already covered (simplicity over a cache that
+        // would need its own invalidation rules; the daily neuron budget shared by both paths already bounds
+        // the cost of a maintainer choosing to ask twice).
+        const alreadyTriggered = await hasAuditEventForHeadSha(env, "github_app.e2e_tests_generation", e2eTargetKey, pr.headSha);
+        if (!alreadyTriggered) {
+          const e2eMode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
+          if (e2eMode === "live") {
+            await runE2eTestGenerationAndDeliver(env, {
+              repoFullName,
+              installationId,
+              pr,
+              settings,
+              manifest,
+              files: manifestFiles,
+              // No comment-invoker exists for an automated trigger -- the PR's own author is the closest
+              // analogue to "who this generated test is for" (unlike the explicit command, where `actor` is
+              // whoever typed the command).
+              actor: author ?? "the PR author",
+              mode: e2eMode,
+              deliveryId: webhook.deliveryId,
+              targetKey: e2eTargetKey,
+              trigger: "auto",
+            });
+          } else {
+            await recordGenerateTestsSkip(env, webhook.deliveryId, repoFullName, e2eTargetKey, author, e2eMode === "dry_run" ? "dry_run" : "agent_paused");
+          }
+        }
+      }
     }
     // Pre-merge checks (#review-pre-merge-checks, opt-in via .gittensory.yml review.pre_merge_checks). DETERMINISTIC
     // content assertions (title/description must contain a phrase, a label must be present), optionally path-gated.
@@ -9281,6 +9372,28 @@ async function maybePublishPrPublicSurface(
            * a non-null head SHA (it no-ops on a nullish one), and an open PR does not lose its head SHA once
            * set; the `?? null` is a type-level fallback for a practically-unreachable branch, mirroring the
            * identical `advisory.headSha ?? null` fallbacks elsewhere in this function. */
+          metadata: { deliveryId: webhook.deliveryId, repoFullName, headSha: advisory.headSha ?? null },
+        }).catch(() => undefined);
+      }
+    } else if (autoReviewSkipReason === "review paused (commit threshold)") {
+      // #selfhost-token-burn: countPublishedAiReviewHeads now counts the PR's OWN current head (see that
+      // function's own doc comment), so this reason can fire repeatedly for the SAME unchanged head across
+      // every scheduled sweep pass, not just once when a truly new commit lands. Without reusing the cached
+      // findings here, an already-published blocker would silently vanish from every later gate evaluation
+      // the instant the pause engaged (#3719's original regression) — reapply them the SAME way a
+      // frozen-for-manual-review PR does, just under this reason's own distinct audit event.
+      const pausedReview = await getLatestPublishedAiReview(env, repoFullName, pr.number, settings.aiReviewMode).catch(() => null);
+      if (pausedReview && hasPublicReviewAssessment(pausedReview.notes)) {
+        advisory.findings.push(...pausedReview.findings);
+        aiReview = pausedReview;
+        aiReviewWasReused = true;
+        incr("gittensory_ai_review_paused_reuse_total");
+        await recordAuditEvent(env, {
+          eventType: "github_app.ai_review_paused_reuse",
+          actor: author,
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "completed",
+          detail: "Auto-review is paused (commit threshold); reused the last published AI review instead of spending a fresh call",
           metadata: { deliveryId: webhook.deliveryId, repoFullName, headSha: advisory.headSha ?? null },
         }).catch(() => undefined);
       }
@@ -10992,7 +11105,7 @@ async function maybeProcessGateOverrideCommand(
   // an operator's pause or the DB kill-switch does not stop a maintainer's @gittensory gate-override from
   // flipping the live Gate check-run to neutral and posting a real confirmation comment.
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -11158,7 +11271,7 @@ async function maybeProcessResolveCommand(env: Env, deliveryId: string, payload:
   const gate = evaluateGateCheck(advisory, gateCheckPolicy(settings, null, undefined, pr.slopRisk ?? null));
   const selection = selectWarningsForResolve(gate.warnings, findingRef);
   if (selection.reason === "finding_not_found") { await recordAuditEvent(env, { eventType: "github_app.finding_resolved_skipped", actor: req.actor, targetKey, outcome: "completed", detail: selection.reason, metadata: { deliveryId, repoFullName: req.repoFullName, reason: selection.reason } }); await recordGithubProductUsage(env, "finding_resolved_skipped", { actor: req.actor, repoFullName: req.repoFullName, targetKey, outcome: "skipped", metadata: { reason: selection.reason } }); return true; }
-  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
+  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
   if (mode !== "live") { const skipReason = mode === "dry_run" ? "dry_run" : "agent_paused"; await recordAuditEvent(env, { eventType: "github_app.finding_resolved_skipped", actor: req.actor, targetKey, outcome: "completed", detail: skipReason, metadata: { deliveryId, repoFullName: req.repoFullName, reason: skipReason } }); await recordGithubProductUsage(env, "finding_resolved_skipped", { actor: req.actor, repoFullName: req.repoFullName, targetKey, outcome: "skipped", metadata: { reason: skipReason } }); return true; }
   const reviewManifest = await loadRepoFocusManifest(env, req.repoFullName).catch(() => null);
   const reviewMemoryEnabled = shouldApplyReviewMemory(env, resolveReviewMemoryManifestToggle(reviewManifest));
@@ -11172,10 +11285,11 @@ async function maybeProcessResolveCommand(env: Env, deliveryId: string, payload:
 
 /**
  * `@gittensory review` (#2163, part of #1960, alias `re-review`): a maintainer/collaborator/confirmed-miner
- * asks for a fresh AUTO-REVIEW pass on this PR. AUTO-REVIEW SCOPE ONLY, same hard constraint as pause/resolve/
- * explain (#1960): this dispatches to the EXISTING reReviewStoredPullRequest path with `force: true` (bypasses
- * the AI-review cache/dedup, since a maintainer explicitly typing the command wants a fresh verdict, not a
- * cached one) — it never touches the Gate check-run, the AgentActionMode, or the one-shot disposition directly;
+ * asks for an AUTO-REVIEW pass on this PR. AUTO-REVIEW SCOPE ONLY, same hard constraint as pause/resolve/
+ * explain (#1960): this dispatches to the EXISTING reReviewStoredPullRequest path. Maintainers and
+ * collaborators keep the explicit fresh-review behavior; author/miner self-reruns intentionally reuse the
+ * normal cached path so a low-privilege actor cannot repeatedly spend provider budget or re-roll findings.
+ * It never touches the Gate check-run, the AgentActionMode, or the one-shot disposition directly;
  * whatever reReviewStoredPullRequest's own gate evaluation produces is exactly what a scheduled sweep pass
  * would produce. If the PR is currently paused (hasAutoreviewPausedMarker), reReviewStoredPullRequest's own
  * existing skipAiReview-on-pause behavior still applies — this command does not special-case or bypass pause;
@@ -11209,14 +11323,15 @@ async function maybeProcessReviewCommand(env: Env, deliveryId: string, payload: 
   }
   // Same dry-run/paused gate every other action command respects (pause/resolve/explain/gate-override/
   // generate-tests) -- a paused or dry-run repo must not dispatch a live re-review or post a confirmation.
-  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
+  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
   if (mode !== "live") {
     await recordReviewCommandSkip(env, deliveryId, req.repoFullName, targetKey, req.actor, mode === "dry_run" ? "dry_run" : "agent_paused");
     return true;
   }
   const confirmation = sanitizePublicComment([AGENT_COMMAND_COMMENT_MARKER, "", "> [!NOTE]", `> **Re-review triggered by @${req.actor}**`, "> Re-running auto-review for this PR. The Gate check-run and one-shot disposition are produced the same way a scheduled pass would.", "", "---", gittensoryFooter()].join("\n"));
   await createIssueComment(env, req.installationId, req.repoFullName, req.pr.number, confirmation);
-  await reReviewStoredPullRequest(env, deliveryId, req.installationId, req.repoFullName, req.pr.number, undefined, { force: true });
+  const forceFreshReview = authorization.actorKind === "maintainer";
+  await reReviewStoredPullRequest(env, deliveryId, req.installationId, req.repoFullName, req.pr.number, undefined, forceFreshReview ? { force: true } : undefined);
   await recordAuditEvent(env, { eventType: "github_app.review_command_completed", actor: req.actor, targetKey, outcome: "completed", detail: "Re-review dispatched.", metadata: { deliveryId, repoFullName: req.repoFullName } });
   await recordGithubProductUsage(env, "review_command_completed", { actor: req.actor, repoFullName: req.repoFullName, targetKey, outcome: "completed", metadata: { actorKind: authorization.actorKind } });
   return true;
@@ -11461,29 +11576,69 @@ async function maybeProcessGenerateTestsCommand(env: Env, deliveryId: string, pa
   }
   // Same dry-run/paused gate every other action command respects (mirrors maybeProcessResolveCommand's own
   // resolveAgentActionMode check) — an agent-paused or dry-run repo gets no generated content posted at all.
-  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
+  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
   if (mode !== "live") {
     const skipReason = mode === "dry_run" ? "dry_run" : "agent_paused";
     await recordGenerateTestsSkip(env, deliveryId, req.repoFullName, targetKey, req.actor, skipReason);
     return true;
   }
   const files = await listPullRequestFiles(env, req.repoFullName, req.pr.number);
-  const changedPaths = files.map((file) => file.path);
+  await runE2eTestGenerationAndDeliver(env, {
+    repoFullName: req.repoFullName,
+    installationId: req.installationId,
+    pr,
+    settings,
+    manifest,
+    files,
+    actor: req.actor,
+    mode,
+    deliveryId,
+    targetKey,
+    trigger: "command",
+  });
+  return true;
+}
+
+/**
+ * The shared generation-and-delivery core behind BOTH `@gittensory generate-tests` (#4195, the explicit
+ * command) and the `manifest_missing_tests` auto-trigger (#4196) — one code path, so the two triggers can
+ * never silently drift apart. Everything the caller must have already resolved BEFORE this runs: the feature
+ * is enabled (#4192's `resolveConvergedFeature` gate), the repo is not paused/dry-run (`mode === "live"`), and
+ * (for the auto-trigger specifically) the per-head-SHA double-generation guard has already passed — this
+ * function itself has no opinion on any of that, it only generates, delivers, and audits.
+ */
+async function runE2eTestGenerationAndDeliver(
+  env: Env,
+  args: {
+    repoFullName: string;
+    installationId: number;
+    pr: PullRequestRecord;
+    settings: RepositorySettings;
+    manifest: FocusManifest | null;
+    files: Awaited<ReturnType<typeof listPullRequestFiles>>;
+    actor: string;
+    mode: ReturnType<typeof resolveAgentActionMode>;
+    deliveryId: string;
+    targetKey: string;
+    trigger: "command" | "auto";
+  },
+): Promise<void> {
+  const changedPaths = args.files.map((file) => file.path);
   // BYOK resolution mirrors runAiReviewForAdvisory's own (re-resolved per-caller is this codebase's
   // established convention for this exact 3-line block — see e.g. the vision-capture caller above).
-  const storedKey = settings.aiReviewByok ? await getDecryptedRepositoryAiKey(env, req.repoFullName) : null;
+  const storedKey = args.settings.aiReviewByok ? await getDecryptedRepositoryAiKey(env, args.repoFullName) : null;
   const providerKey =
-    storedKey && (!settings.aiReviewProvider || settings.aiReviewProvider === storedKey.provider)
-      ? { provider: storedKey.provider, key: storedKey.key, model: settings.aiReviewModel ?? storedKey.model }
+    storedKey && (!args.settings.aiReviewProvider || args.settings.aiReviewProvider === storedKey.provider)
+      ? { provider: storedKey.provider, key: storedKey.key, model: args.settings.aiReviewModel ?? storedKey.model }
       : null;
-  const result = await runGittensoryE2eTestGeneration(env, {
-    repoFullName: req.repoFullName,
-    prNumber: req.pr.number,
-    title: pr.title,
-    body: pr.body,
-    files: files.map((file) => ({ path: file.path, patch: typeof file.payload?.patch === "string" ? file.payload.patch : undefined })),
-    instructions: resolveE2eTestGenInstructions(manifest?.review, changedPaths),
-    actor: req.actor,
+  const result = await runGittensoryE2eTestGeneration(withAdvisoryAiEnv(env, args.settings.advisoryAiRouting?.e2eTestGen === true), {
+    repoFullName: args.repoFullName,
+    prNumber: args.pr.number,
+    title: args.pr.title,
+    body: args.pr.body,
+    files: args.files.map((file) => ({ path: file.path, patch: typeof file.payload?.patch === "string" ? file.payload.patch : undefined })),
+    instructions: resolveE2eTestGenInstructions(args.manifest?.review, changedPaths),
+    actor: args.actor,
     providerKey,
   });
   const testSource = result.status === "ok" ? result.testSource : null;
@@ -11492,25 +11647,26 @@ async function maybeProcessGenerateTestsCommand(env: Env, deliveryId: string, pa
   // test onto the PR's own head branch, UNLESS the PR author is a confirmed Gittensor miner (#4201's
   // scoring-integrity safeguard) — that check runs regardless of this repo's own delivery config, since the
   // external, upstream-computed score must never be able to include a maintainer-authored line a miner didn't
-  // write themselves.
-  const deliveryMode = resolveReviewPromptOverrides(manifest).e2eTestDelivery ?? "comment";
+  // write themselves. The automated #4196 trigger has no maintainer invoker to authorize, so it is always
+  // comment-only even for repositories that opt explicit maintainer commands into commit delivery.
+  const deliveryMode = args.trigger === "auto" ? "comment" : resolveReviewPromptOverrides(args.manifest).e2eTestDelivery ?? "comment";
   let commitOutcome: E2eTestGenCommitOutcome | undefined;
   if (testSource && deliveryMode === "commit") {
-    const minerDetection = pr.authorLogin
-      ? await getCachedOfficialMinerDetection(env, pr.authorLogin, { targetKey, deliveryId })
+    const minerDetection = args.pr.authorLogin
+      ? await getCachedOfficialMinerDetection(env, args.pr.authorLogin, { targetKey: args.targetKey, deliveryId: args.deliveryId })
       : ({ status: "not_found" } as const);
     if (minerDetection.status === "confirmed") {
       commitOutcome = { status: "blocked" };
-    } else if (pr.headSha && pr.headRef) {
+    } else if (args.pr.headSha && args.pr.headRef) {
       const attempt = await commitE2eTestToPrBranch(env, {
-        installationId: req.installationId,
-        repoFullName: req.repoFullName,
-        prNumber: req.pr.number,
-        headRef: pr.headRef,
-        headSha: pr.headSha,
+        installationId: args.installationId,
+        repoFullName: args.repoFullName,
+        prNumber: args.pr.number,
+        headRef: args.pr.headRef,
+        headSha: args.pr.headSha,
         testSource,
-        actor: req.actor,
-        mode,
+        actor: args.actor,
+        mode: args.mode,
       });
       // The render layer only distinguishes committed/declined/blocked -- an "error" (unexpected failure,
       // vs. an expected can-never-work case) is still surfaced to the maintainer as "declined", with its
@@ -11521,32 +11677,35 @@ async function maybeProcessGenerateTestsCommand(env: Env, deliveryId: string, pa
     }
   }
 
-  const body = buildE2eTestGenCommentBody({ actor: req.actor, testSource, commit: commitOutcome });
+  const body = buildE2eTestGenCommentBody({ actor: args.actor, testSource, commit: commitOutcome });
   try {
-    await createIssueComment(env, req.installationId, req.repoFullName, req.pr.number, sanitizePublicComment(body));
+    await createIssueComment(env, args.installationId, args.repoFullName, args.pr.number, sanitizePublicComment(body));
   } catch (error) {
-    // sanitizePublicComment THROWS on a forbidden term rather than stripping it -- generated test source is
-    // far less predictable than this codebase's other curated comment content, so failing closed to a safe
-    // withheld-content note (never the raw error, never the raw generated text) is the right degrade here.
+    // Generated test source is far less predictable than this codebase's other curated comment content, so
+    // a failure posting it (a GitHub API error, a rate limit, or any other unexpected throw) degrades to a
+    // safe withheld-content note (never the raw error, never the raw generated text) rather than leaving the
+    // maintainer with silence.
     await createIssueComment(
       env,
-      req.installationId,
-      req.repoFullName,
-      req.pr.number,
-      sanitizePublicComment(buildE2eTestGenCommentBody({ actor: req.actor, testSource: null })),
+      args.installationId,
+      args.repoFullName,
+      args.pr.number,
+      sanitizePublicComment(buildE2eTestGenCommentBody({ actor: args.actor, testSource: null })),
     );
-    console.log(JSON.stringify({ event: "e2e_test_gen_comment_withheld", repoFullName: req.repoFullName, pr: req.pr.number, error: errorMessage(error) }));
+    console.log(JSON.stringify({ event: "e2e_test_gen_comment_withheld", repoFullName: args.repoFullName, pr: args.pr.number, error: errorMessage(error) }));
   }
   await recordAuditEvent(env, {
     eventType: "github_app.e2e_tests_generation",
-    actor: req.actor,
-    targetKey,
+    actor: args.actor,
+    targetKey: args.targetKey,
     outcome: "completed",
     detail: testSource ? "Generated an E2E test." : `No usable test generated (${result.status}).`,
-    metadata: { deliveryId, repoFullName: req.repoFullName, status: result.status, byok: Boolean(providerKey), deliveryMode, ...(commitOutcome ? { commitStatus: commitOutcome.status } : {}) },
+    // headSha is included so the #4196 auto-trigger's per-commit double-generation guard (hasAuditEventForHeadSha)
+    // can find this row again; a null headSha (never observed in practice -- both callers require a truthy one
+    // before reaching here) degrades to simply never matching that guard, not a thrown error.
+    metadata: { deliveryId: args.deliveryId, repoFullName: args.repoFullName, status: result.status, byok: Boolean(providerKey), deliveryMode, trigger: args.trigger, headSha: args.pr.headSha ?? null, ...(commitOutcome ? { commitStatus: commitOutcome.status } : {}) },
   });
-  await recordGithubProductUsage(env, "e2e_tests_generation", { actor: req.actor, repoFullName: req.repoFullName, targetKey, outcome: "completed", metadata: { status: result.status, generated: Boolean(testSource), deliveryMode, ...(commitOutcome ? { commitStatus: commitOutcome.status } : {}) } });
-  return true;
+  await recordGithubProductUsage(env, "e2e_tests_generation", { actor: args.actor, repoFullName: args.repoFullName, targetKey: args.targetKey, outcome: "completed", metadata: { status: result.status, generated: Boolean(testSource), deliveryMode, trigger: args.trigger, ...(commitOutcome ? { commitStatus: commitOutcome.status } : {}) } });
 }
 
 async function postGenerateTestsNotEnabledComment(env: Env, installationId: number, repoFullName: string, prNumber: number): Promise<void> {
@@ -11625,7 +11784,7 @@ async function maybeProcessConfigurationCommand(
     return true;
   }
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -11748,7 +11907,7 @@ async function maybeProcessPlanCommand(
   // incurs the AI cost speculatively — mirroring how the reopen-reclose handler skips its write uniformly for
   // both dry_run and paused, not just paused.
   const planMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -11764,7 +11923,7 @@ async function maybeProcessPlanCommand(
     return true;
   }
   const plan = await generateIssuePlan(
-    env,
+    withAdvisoryAiEnv(env, settings.advisoryAiRouting?.planner === true),
     { title: req.issue.title, body: req.issue.body },
     {
       actor: req.actor,
@@ -12308,7 +12467,7 @@ async function closeDraftDodgeAttemptIfBlocked(
     // and a dry-run records the would-be close without touching GitHub.
     const draftMode = resolveAgentActionMode({
       globalPaused:
-        isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+        isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
     });
@@ -12540,7 +12699,7 @@ async function recloseDisallowedReopenIfNeeded(
   // the re-close would genuinely reach GitHub on a repo that never authorized any action (#review-audit).
   if (!isAgentConfigured(reopenSettings.autonomy)) return false;
   const reopenMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, reopenSettings.agentGlobalFreezeOverride)),
     agentPaused: reopenSettings.agentPaused,
     agentDryRun: reopenSettings.agentDryRun,
   });
@@ -12723,7 +12882,7 @@ async function closeReviewEvasionSelfCloseIfActive(
 
   const targetKey = `${repoFullName}#${pr.number}`;
   const evasionMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -12975,7 +13134,7 @@ async function closeReviewEvasionDraftConversionIfActive(
 
   const targetKey = `${repoFullName}#${pr.number}`;
   const evasionMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -13193,7 +13352,7 @@ async function closeRepeatedDraftCyclingIfDetected(
 
   const targetKey = `${repoFullName}#${pr.number}`;
   const evasionMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -13440,7 +13599,7 @@ async function maybeThrottleReviewNagPing(
   if (pingCount <= maxPings) return false; // under threshold — normal command processing proceeds unchanged
 
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -13522,6 +13681,7 @@ async function maybeThrottleReviewNagPing(
       autonomy: settings.autonomy,
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
+      agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
       installationPermissions: installation?.permissions ?? null,
       authorLogin: pr.authorLogin,
       moderationSettings: { moderationGateMode: settings.moderationGateMode, moderationRules: settings.moderationRules, moderationWarningLabel: settings.moderationWarningLabel, moderationBannedLabel: settings.moderationBannedLabel },
@@ -13632,7 +13792,7 @@ async function maybeThrottleMonitoredMentions(
   if (pingCount <= maxPings) return false;
 
   const mode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });
@@ -13707,6 +13867,7 @@ async function maybeThrottleMonitoredMentions(
       autonomy: settings.autonomy,
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
+      agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride,
       installationPermissions: installation?.permissions ?? null,
       authorLogin: pr.authorLogin,
       moderationSettings: { moderationGateMode: settings.moderationGateMode, moderationRules: settings.moderationRules, moderationWarningLabel: settings.moderationWarningLabel, moderationBannedLabel: settings.moderationBannedLabel },
@@ -13954,7 +14115,7 @@ async function maybeProcessGittensoryMentionCommand(
   // Respect pause/dry-run/global-freeze like every other agent-driven write in this file (#2258) — the answer
   // card is a live public comment post, same as gate-override's confirmation comment.
   const mentionMode = resolveAgentActionMode({
-    globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+    globalPaused: isGlobalAgentPause(env) || (await isDbFrozenForRepo(env, settings.agentGlobalFreezeOverride)),
     agentPaused: settings.agentPaused,
     agentDryRun: settings.agentDryRun,
   });

@@ -37,7 +37,7 @@ import {
   getPendingAgentAction,
   getPullRequest,
   getRepository,
-  isGlobalAgentFrozen,
+  isDbFrozenForRepo,
   getRepoQueueTrendSnapshot,
   listAgentAuditEvents,
   listCheckSummaries,
@@ -95,6 +95,7 @@ import { loadMaintainerNoiseReport, maintainerNoiseSummary } from "../services/m
 import { loadLabelAudit, labelAuditSummary } from "../services/label-audit";
 import { loadMaintainerLaneReport, maintainerLaneSummary } from "../services/maintainer-lane";
 import { buildRepoOnboardingPackPreviewForRepo } from "../services/repo-onboarding-pack";
+import { loadGatePrecisionReport } from "../services/gate-precision";
 import { buildUnavailableQueueTrendReport } from "../services/queue-trends";
 import {
   applyMcpPlanningChoices,
@@ -154,7 +155,6 @@ import { loadUpstreamStatus } from "../upstream/ruleset";
 import { simulateOpenPrPressure, type OpenPrPressureInput } from "../services/open-pr-pressure-scenarios";
 import { buildFindingTaxonomyDocument, FINDING_TAXONOMY_URI } from "../review/finding-taxonomy";
 import { buildEnrichmentAnalyzersTaxonomyDocument, ENRICHMENT_ANALYZERS_URI } from "../review/enrichment-analyzers-taxonomy";
-import { buildSlopRulesDocument, SLOP_RULES_URI } from "../review/slop-rules-taxonomy";
 
 type AppContext = Context<{ Bindings: Env }>;
 type ToolPayload = {
@@ -778,6 +778,18 @@ const maintainerMeasurementReportOutputSchema = {
   status: z.string().optional(),
 };
 
+// #2220 - gate-precision measurement surfaced over MCP. Mirrors the
+// maintainerMeasurementReportOutputSchema pattern: report fields optional, structured sub-reports as
+// z.unknown() (buildGatePrecisionReport is the single source of truth for their shape).
+const gatePrecisionOutputSchema = {
+  repoFullName: z.string().optional(),
+  generatedAt: z.string().optional(),
+  windowDays: z.number().nullable().optional(),
+  perGateType: z.array(z.unknown()).optional(),
+  overall: z.unknown().optional(),
+  signals: z.array(z.string()).optional(),
+};
+
 const contributorProfileOutputSchema = {
   login: z.string().optional(),
   github: z.unknown().optional(),
@@ -1166,15 +1178,49 @@ const variantsOutputSchema = {
   variants: z.array(z.unknown()).optional(),
 };
 
-// #2224 - pure, read-only open-PR pressure simulator surfaced over MCP. queueHealth/roleContext use the same
-// permissive z.unknown() convention as the other engine-shaped MCP inputs (the simulator is the single source
-// of truth for their structure); the tool reveals nothing beyond a computation on the caller-supplied context.
+const SIMULATE_OPEN_PR_PRESSURE_MAX_COUNT = 1_000_000;
+const simulateOpenPrPressureCountSchema = z.number().int().min(0).max(SIMULATE_OPEN_PR_PRESSURE_MAX_COUNT);
+const simulateOpenPrPressureQueueHealthSchema = z
+  .object({
+    repoFullName: z.string().min(3).max(SCENARIO_MAX_REPO_FULL_NAME_CHARS),
+    generatedAt: z.string().min(1).max(100),
+    burdenScore: z.number().finite(),
+    level: z.enum(["low", "medium", "high", "critical"]),
+    summary: z.string().max(1_000),
+    signals: z
+      .object({
+        openIssues: simulateOpenPrPressureCountSchema,
+        openPullRequests: simulateOpenPrPressureCountSchema,
+        unlinkedPullRequests: simulateOpenPrPressureCountSchema,
+        stalePullRequests: simulateOpenPrPressureCountSchema,
+        draftPullRequests: simulateOpenPrPressureCountSchema,
+        maintainerAuthoredPullRequests: simulateOpenPrPressureCountSchema,
+        collisionClusters: simulateOpenPrPressureCountSchema,
+        ageBuckets: z
+          .object({
+            under7Days: simulateOpenPrPressureCountSchema,
+            days7To30: simulateOpenPrPressureCountSchema,
+            over30Days: simulateOpenPrPressureCountSchema,
+          })
+          .passthrough(),
+        likelyReviewablePullRequests: simulateOpenPrPressureCountSchema,
+        cachedOpenPullRequests: simulateOpenPrPressureCountSchema.optional(),
+        likelyReviewablePullRequestsSource: z.enum(["cache", "sampled_cache", "authoritative"]).optional(),
+      })
+      .passthrough(),
+    findings: z.array(z.unknown()).max(100),
+  })
+  .passthrough()
+  .nullable();
+
+// #2224 - pure, read-only open-PR pressure simulator surfaced over MCP. The simulator only reads
+// bounded queue counts and maintainer-lane state, so validate those fields at the MCP boundary.
 const simulateOpenPrPressureShape = {
-  repoFullName: z.string(),
-  generatedAt: z.string(),
-  queueHealth: z.unknown(),
-  roleContext: z.unknown(),
-  contributorOpenPrCount: z.number().optional(),
+  repoFullName: z.string().min(3).max(SCENARIO_MAX_REPO_FULL_NAME_CHARS),
+  generatedAt: z.string().min(1).max(100),
+  queueHealth: simulateOpenPrPressureQueueHealthSchema,
+  roleContext: z.object({ maintainerLane: z.boolean() }).passthrough(),
+  contributorOpenPrCount: simulateOpenPrPressureCountSchema.optional(),
 };
 const simulateOpenPrPressureOutputSchema = {
   repoFullName: z.string().optional(),
@@ -1402,6 +1448,17 @@ export class GittensoryMcp {
         outputSchema: maintainerMeasurementReportOutputSchema,
       },
       async (input) => this.toolResult(await this.getOutcomeCalibration(input)),
+    );
+
+    server.registerTool(
+      "gittensory_get_gate_precision",
+      {
+        description:
+          "Return per-gate-type false-positive precision for a repo's recorded gate blocks — blocked / blocked-then-merged / overridden counts and false-positive rates with low-sample guards. Maintainer-authenticated; measurement only.",
+        inputSchema: ownerRepoWindowShape,
+        outputSchema: gatePrecisionOutputSchema,
+      },
+      async (input) => this.toolResult(await this.getGatePrecision(input)),
     );
 
     server.registerTool(
@@ -2184,26 +2241,6 @@ export class GittensoryMcp {
       }),
     );
 
-    // #2237 — read-only catalog of the deterministic slop rule codes + score bands for MCP discovery.
-    server.registerResource(
-      "gittensory_slop_rules",
-      SLOP_RULES_URI,
-      {
-        title: "Gittensory Slop Rules",
-        description: "Deterministic slop-signal catalog: rule codes with their point weights (PR + issue) and the clean/low/elevated/high score bands.",
-        mimeType: "application/json",
-      },
-      async () => ({
-        contents: [
-          {
-            uri: SLOP_RULES_URI,
-            mimeType: "application/json",
-            text: JSON.stringify(buildSlopRulesDocument(), null, 2),
-          },
-        ],
-      }),
-    );
-
     return server;
   }
 
@@ -2583,6 +2620,20 @@ export class GittensoryMcp {
     const report = await buildRepoOutcomeCalibration(this.env, fullName, input.windowDays);
     return {
       summary: outcomeCalibrationSummary(fullName, report.slop),
+      data: report as unknown as Record<string, unknown>,
+    };
+  }
+
+  // #2220 - surface the existing gate-precision measurement over MCP. Same per-repo read gate as
+  // getOutcomeCalibration (requireRepoAccess); loadGatePrecisionReport is measurement-only and already
+  // scoped to the single repo, so nothing cross-repo is revealed. The options object is spread-omitted
+  // when windowDays is absent to satisfy exactOptionalPropertyTypes.
+  private async getGatePrecision(input: { owner: string; repo: string; windowDays?: number | undefined }): Promise<ToolPayload> {
+    const fullName = `${input.owner}/${input.repo}`;
+    await this.requireRepoAccess(fullName);
+    const report = await loadGatePrecisionReport(this.env, fullName, input.windowDays === undefined ? {} : { windowDays: input.windowDays });
+    return {
+      summary: `Gittensory gate precision for ${fullName}: ${report.overall.blocked} gate blocks, overall false-positive rate ${report.overall.falsePositiveRate ?? "n/a (below sample threshold)"}.`,
       data: report as unknown as Record<string, unknown>,
     };
   }
@@ -3059,7 +3110,7 @@ export class GittensoryMcp {
     const autonomy = settings.autonomy;
     const actingActionClasses = AGENT_ACTION_CLASSES.filter((actionClass) => isActingAutonomyLevel(resolveAutonomy(autonomy, actionClass)));
     const installation = repo?.installationId ? await getInstallation(this.env, repo.installationId) : null;
-    const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(this.env) || (await isGlobalAgentFrozen(this.env)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
+    const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(this.env) || (await isDbFrozenForRepo(this.env, settings.agentGlobalFreezeOverride)), agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun });
     const permissionReadiness = resolveAgentPermissionReadiness({ autonomy, installationPermissions: installation?.permissions ?? null });
     return {
       summary: `Agent automation for ${fullName}: mode=${mode}, ${actingActionClasses.length} acting class(es), ${pendingActionCount} pending approval(s).`,

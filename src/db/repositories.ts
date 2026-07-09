@@ -540,6 +540,7 @@ export async function getRepositorySettings(env: Env, fullName: string): Promise
       publicQualityMetrics: false,
       agentPaused: false,
       agentDryRun: false,
+      agentGlobalFreezeOverride: false,
       commandAuthorization: normalizeCommandAuthorizationPolicy(DEFAULT_COMMAND_AUTHORIZATION_POLICY).policy,
       contributorBlacklist: [],
       autonomy: {},
@@ -619,6 +620,7 @@ export async function getRepositorySettings(env: Env, fullName: string): Promise
     publicQualityMetrics: row.publicQualityMetrics,
     agentPaused: row.agentPaused,
     agentDryRun: row.agentDryRun,
+    agentGlobalFreezeOverride: row.agentGlobalFreezeOverride,
     commandAuthorization: parseCommandAuthorizationPolicy(row.commandAuthorizationJson),
     contributorBlacklist: parseContributorBlacklist(row.contributorBlacklistJson),
     autonomy: parseAutonomyPolicy(row.autonomyJson),
@@ -740,6 +742,7 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
     publicQualityMetrics: settings.publicQualityMetrics ?? false,
     agentPaused: settings.agentPaused ?? false,
     agentDryRun: settings.agentDryRun ?? false,
+    agentGlobalFreezeOverride: settings.agentGlobalFreezeOverride ?? false,
     commandAuthorization: normalizeCommandAuthorizationPolicy(settings.commandAuthorization).policy,
     contributorBlacklist: normalizeContributorBlacklist(settings.contributorBlacklist).entries,
     autonomy: normalizeAutonomyPolicy(settings.autonomy),
@@ -820,6 +823,7 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
       publicQualityMetrics: resolved.publicQualityMetrics,
       agentPaused: resolved.agentPaused,
       agentDryRun: resolved.agentDryRun,
+      agentGlobalFreezeOverride: resolved.agentGlobalFreezeOverride,
       commandAuthorizationJson: jsonString(resolved.commandAuthorization),
       contributorBlacklistJson: jsonString(resolved.contributorBlacklist),
       autonomyJson: jsonString(resolved.autonomy),
@@ -905,6 +909,7 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
         publicQualityMetrics: resolved.publicQualityMetrics,
         agentPaused: resolved.agentPaused,
         agentDryRun: resolved.agentDryRun,
+        agentGlobalFreezeOverride: resolved.agentGlobalFreezeOverride,
         commandAuthorizationJson: jsonString(resolved.commandAuthorization),
         contributorBlacklistJson: jsonString(resolved.contributorBlacklist),
         autonomyJson: jsonString(resolved.autonomy),
@@ -2498,6 +2503,18 @@ export async function isGlobalAgentFrozen(env: Env): Promise<boolean> {
   }
 }
 
+/** Per-repo override of the DB-backed global kill-switch (#4372, incident follow-up): lets an operator keep
+ *  `global_agent_controls.frozen` ON as the fleet-wide safe default while opting ONE repo at a time back into
+ *  live execution via that repo's `agentGlobalFreezeOverride` setting — the same global-default +
+ *  per-repo-override shape every other gittensory setting already uses. Deliberately does NOT take the
+ *  `AGENT_ACTIONS_PAUSED` env var into account: callers must still OR this result with {@link isGlobalAgentPause}
+ *  themselves (matching every existing `resolveAgentActionMode({ globalPaused: ... })` call site), so the env
+ *  var stays an absolute, non-overridable hard stop no repo setting can ever bypass. */
+export async function isDbFrozenForRepo(env: Env, agentGlobalFreezeOverride: boolean | null | undefined): Promise<boolean> {
+  if (agentGlobalFreezeOverride === true) return false;
+  return isGlobalAgentFrozen(env);
+}
+
 /** Atomic re-gate fan-out dedup (#audit-fanout-dedup): claim the global fan-out slot for this window. The
  *  conditional UPDATE on the singleton matches only when the last fan-out is unset or older than `windowMs`. D1
  *  serializes writes, so when a BURST of fan-out jobs runs at once (a deploy-restart cron catch-up, or fan-out
@@ -2894,6 +2911,29 @@ export async function hasAuditEventForDelivery(env: Env, actor: string, eventTyp
         eq(auditEvents.targetKey, targetKey),
         gte(auditEvents.createdAt, sinceIso),
         sql`json_extract(${auditEvents.metadataJson}, '$.deliveryId') = ${deliveryId}`,
+      ),
+    );
+  /* v8 ignore next -- count(*) always returns exactly one row; the empty-array guard only satisfies the destructure type. */
+  return (row?.count ?? 0) > 0;
+}
+
+/** Whether `eventType` has ALREADY been recorded for this `targetKey` at this EXACT `headSha` -- unlike
+ *  `hasAuditEventForDelivery` above (which guards a single redelivered webhook within a short window), this has
+ *  no time bound: a head SHA is a stable, permanent identity, so a match at any point in the past is still a
+ *  match. Used by the `manifest_missing_tests` auto-trigger (#4196) to guard against re-spending an LLM call on
+ *  every re-review/sweep pass over an UNCHANGED commit -- a genuinely new push (a new head SHA) is always a
+ *  fresh miss regardless of how many prior SHAs already fired. json_extract mirrors hasAuditEventForDelivery's
+ *  own metadata-predicate pattern rather than a fragile LIKE match on the raw JSON string. */
+export async function hasAuditEventForHeadSha(env: Env, eventType: string, targetKey: string, headSha: string): Promise<boolean> {
+  const db = getDb(env.DB);
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.eventType, eventType),
+        eq(auditEvents.targetKey, targetKey),
+        sql`json_extract(${auditEvents.metadataJson}, '$.headSha') = ${headSha}`,
       ),
     );
   /* v8 ignore next -- count(*) always returns exactly one row; the empty-array guard only satisfies the destructure type. */
@@ -4445,21 +4485,29 @@ export async function getLatestPublishedAiReview(
   };
 }
 
-/** Count distinct prior PR head SHAs that already received a published AI review — used by `review.auto_review.auto_pause_after_reviewed_commits`. (#2042) */
+/** Count distinct PR head SHAs that already received a published AI review — used by
+ *  `review.auto_review.auto_pause_after_reviewed_commits`. (#2042)
+ *
+ *  #selfhost-token-burn: previously excluded the PR's OWN current head SHA from this count (#3719), so a PR
+ *  swept repeatedly with NO new commits could never reach the pause threshold — the one head it had ever
+ *  been reviewed on was always the "current" one, so it was always subtracted back out, and the count stayed
+ *  at 0 forever regardless of how many times that same head was actually reviewed. This is what #3719 was
+ *  actually protecting against: `resolveAutoReviewSkipForPullRequest`'s caller used to drop the AI review's
+ *  cached findings entirely once paused, so counting the current head would have silently removed an
+ *  already-published blocker from later gate evaluations. That reuse gap is now fixed at the call site
+ *  (`maybeReuseAiReviewOnAutoPause` in processors.ts reapplies the cached findings whenever the pause reason
+ *  fires), so the count no longer needs to avoid the current head to keep blockers from vanishing — it can
+ *  (and must) count it, matching this function's own always-documented "published AI review count" contract. */
 export async function countPublishedAiReviewHeads(
   env: Env,
   repoFullName: string,
   pullNumber: number,
-  currentHeadSha?: string | null | undefined,
 ): Promise<number> {
-  const currentHeadClause = currentHeadSha ? " AND head_sha != ?" : "";
   const row = await env.DB
     .prepare(
-      `SELECT COUNT(DISTINCT head_sha) AS cnt FROM ai_review_cache WHERE repo_full_name = ? AND pull_number = ? AND published_at IS NOT NULL${currentHeadClause}`,
+      "SELECT COUNT(DISTINCT head_sha) AS cnt FROM ai_review_cache WHERE repo_full_name = ? AND pull_number = ? AND published_at IS NOT NULL",
     )
-    .bind(
-      ...(currentHeadSha ? [repoFullName, pullNumber, currentHeadSha] : [repoFullName, pullNumber]),
-    )
+    .bind(repoFullName, pullNumber)
     .first<{ cnt: number }>();
   /* v8 ignore next -- SQL aggregate count always returns one row; fallback protects D1 driver anomalies. */
   return row?.cnt ?? 0;
