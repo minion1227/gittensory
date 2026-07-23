@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0](https://github.com/minion1227/gittensory/compare/mcp-v0.7.1...mcp-v0.8.0) (2026-07-23)
+
+
+### Features
+
+* **mcp-cli:** add --format=table renderer for report-shaped commands ([#4215](https://github.com/minion1227/gittensory/issues/4215)) ([35736fb](https://github.com/minion1227/gittensory/commit/35736fb41606b959549a16fa66b90dea6e1f9c6f)), closes [#2231](https://github.com/minion1227/gittensory/issues/2231)
+* **mcp-cli:** add `--format ndjson` streaming output for list-shaped commands ([#4228](https://github.com/minion1227/gittensory/issues/4228)) ([19d111a](https://github.com/minion1227/gittensory/commit/19d111a20497e8e5010b82a61e4b5128fd9f9114)), closes [#2232](https://github.com/minion1227/gittensory/issues/2232)
+* **mcp-cli:** add `maintain precision` subcommand for gate false-positive telemetry ([#4221](https://github.com/minion1227/gittensory/issues/4221)) ([07207a7](https://github.com/minion1227/gittensory/commit/07207a7fedea543fffe39d73494bc0c30ff1c3b1)), closes [#2227](https://github.com/minion1227/gittensory/issues/2227)
+* **mcp-cli:** add maintain queue to list pending actions ([#4226](https://github.com/minion1227/gittensory/issues/4226)) ([b646b8a](https://github.com/minion1227/gittensory/commit/b646b8a7417388b562ecdf351b95c521b96df243))
+* **mcp-cli:** add stdio gittensory_get_maintainer_noise proxy ([#4232](https://github.com/minion1227/gittensory/issues/4232)) ([93e6afb](https://github.com/minion1227/gittensory/commit/93e6afbbeda5de132cf7640847c7a0bc7a22a702))
+* **mcp-cli:** add stdio tool gittensory_get_burden_forecast ([#4324](https://github.com/minion1227/gittensory/issues/4324)) ([90da00d](https://github.com/minion1227/gittensory/commit/90da00dbb5e9a632da712f32292a8828e17ceee6)), closes [#2230](https://github.com/minion1227/gittensory/issues/2230)
+* **mcp-cli:** add stdio tool gittensory_get_label_audit ([#4219](https://github.com/minion1227/gittensory/issues/4219)) ([2a063a4](https://github.com/minion1227/gittensory/commit/2a063a41e3050ae98d5c451f3105dc55351cdf74)), closes [#2229](https://github.com/minion1227/gittensory/issues/2229)
+* **mcp-cli:** add tools command listing stdio tool descriptors ([#4225](https://github.com/minion1227/gittensory/issues/4225)) ([54dc362](https://github.com/minion1227/gittensory/commit/54dc3620aa5200011a92cb7bdbcfbea74848c1a6))
+* **mcp-cli:** register gittensory_get_upstream_drift stdio proxy tool ([#4216](https://github.com/minion1227/gittensory/issues/4216)) ([f3507d0](https://github.com/minion1227/gittensory/commit/f3507d07fb521aac9e5d78a7151bbc47ab940845)), closes [#2238](https://github.com/minion1227/gittensory/issues/2238)
+* **mcp:** add gittensory_validate_config tool for .gittensory.yml ([#4049](https://github.com/minion1227/gittensory/issues/4049)) ([590d52c](https://github.com/minion1227/gittensory/commit/590d52cdbce09930a821089b8b16b144d16b585f))
+* **miner-plan:** wire the feasibility gate into a new MCP tool + miner CLI command ([#4270](https://github.com/minion1227/gittensory/issues/4270)) ([#4432](https://github.com/minion1227/gittensory/issues/4432)) ([fb7b5c7](https://github.com/minion1227/gittensory/commit/fb7b5c76804b4fef6e94b0b79f6ec7c107d01dca))
+* **miner-rag:** wire issue-centric RAG into scoped MCP tool ([#4293](https://github.com/minion1227/gittensory/issues/4293)) ([4bea3d9](https://github.com/minion1227/gittensory/commit/4bea3d9a07eee5c9b0f3934accd7286da6f19e4e))
+* **miner-rag:** wire issue-centric RAG into scoped MCP tool ([#4293](https://github.com/minion1227/gittensory/issues/4293)) ([c4aeba0](https://github.com/minion1227/gittensory/commit/c4aeba04f04eed96e529785885bec68330295a62))
+
+
+### Fixes
+
+* **mcp-cli:** add the missing gittensory_get_label_audit CLI descriptor ([#4315](https://github.com/minion1227/gittensory/issues/4315)) ([31c2bca](https://github.com/minion1227/gittensory/commit/31c2bca91109854f559ab446d55cfc2da65e5696))
+* **mcp-cli:** restore bin executable bit ([#4387](https://github.com/minion1227/gittensory/issues/4387)) ([ca5576f](https://github.com/minion1227/gittensory/commit/ca5576fff87d6334ad377362148c3bd11ee1c68f))
+* **mcp:** map review preflight status ([#3972](https://github.com/minion1227/gittensory/issues/3972)) ([0b6bc4b](https://github.com/minion1227/gittensory/commit/0b6bc4b17e3e61a94a66edaff6d1f34aab8e03e9))
+* **mcp:** sanitize validate-config terminal output ([#4090](https://github.com/minion1227/gittensory/issues/4090)) ([a844972](https://github.com/minion1227/gittensory/commit/a84497294fcfa4c3944ac222ef5da443be20d684))
+* **release:** sync package-lock.json via script, not release-please extra-files ([#4179](https://github.com/minion1227/gittensory/issues/4179)) ([b614317](https://github.com/minion1227/gittensory/commit/b614317e506fab3b30bf7fc366d67e268952ba02))
+
 ## [0.7.1](https://github.com/JSONbored/gittensory/compare/mcp-v0.7.0...mcp-v0.7.1) (2026-07-08)
 
 
